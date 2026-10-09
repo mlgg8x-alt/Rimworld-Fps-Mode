@@ -13,8 +13,8 @@ What works today:
 
 - The RimWorld map is rebuilt in MW2: ground, floors, walls, doors, roofs, mountains, caves,
   trees, grass, crops, furniture and items, using RimWorld's own pictures and MW2 models.
-- Every pawn is there. Colonists use their RimWorld pictures, others are dressed MW2
-  soldiers, and animals and mechs are shown as their RimWorld pictures.
+- Every pawn is there as RimWorld's own picture of them: colonists, raiders, animals and
+  mechs.
 - You use your colonist's own gun, with RimWorld's burst, warm-up and cooldown. Your hits
   wound the body part you hit in RimWorld. RimWorld's bullets fly at you and can be dodged.
 - You can throw your colonist's grenades. Explosions, fire, smoke, gas, rain, snow, fog,
@@ -184,7 +184,6 @@ These are environment variables. Set them in PowerShell before running `play.bat
 |---|---|---|
 | `RWMW2_ONE_WINDOW` | `1` | `0` keeps MW2's window open all the time (and open after RimWorld closes) |
 | `RWMW2_FULLSCREEN` | `1` | `0` leaves MW2 windowed while you control a colonist |
-| `RWMW2_RIMWORLD_PAWNS` | `1` | `0` draws colonists as MW2 soldiers instead of their RimWorld pictures |
 | `RWMW2_RIMWORLD_PLANTS` | `1` | `0` uses MW2 tree models instead of RimWorld's plant pictures |
 | `RWMW2_STANDIN_MAP` | `mp_estate` | The MW2 map whose models and textures are borrowed |
 | `RWMW2_BRIDGE_ADDR` | `127.0.0.1:47820` | Where the engine listens for RimWorld. The port can also be changed in the mod's settings |

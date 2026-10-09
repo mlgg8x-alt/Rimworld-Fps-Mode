@@ -313,6 +313,20 @@ Ryan, 2026-10-09 18:28.
       puffs) fly, turn, grow and fade as in RimWorld (`flecks`, 0039 + mod). Glowing and
       heat-shimmer flecks are left out
 
+## M22: raiders only as RimWorld pictures
+Ryan, 2026-10-09 21:23: a big raid came as MW2 soldiers, RimWorld pictures and coloured boxes
+at once. Pawns whose picture RimWorld had not drawn yet (8 new people a snapshot) stood as MW2
+soldiers, or as boxes while the soldier models or a picture's texture were not ready.
+
+- [x] Every pawn is only ever RimWorld's picture of it: no MW2 soldiers, no boxes; one not
+      drawn yet is not shown until it is (0040)
+- [x] A snapshot without pictures keeps the ones a pawn had, and new pictures (downed, new
+      clothes) show the old ones until they have loaded (0040)
+- [x] The mod draws 24 new people a snapshot (was 8), keeps pictures for 400 (was 200), and
+      a person whose portrait RimWorld cannot draw shows their body as drawn on the map; an
+      animal's missing side shows another side (mod)
+- [x] `RWMW2_RIMWORLD_PAWNS` is gone
+
 ## Balance notes
 MW2 fire rates are far above RimWorld bursts. v0 scales per-bullet damage by
 RimWorld DPS / MW2 DPS with one tunable multiplier. Weapon map starts as: assault rifle → ACR,

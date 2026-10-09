@@ -299,4 +299,9 @@ a scratch copy that already has the earlier patches (`add -N` makes new files sh
   entity mesh. MW2 closes itself once RimWorld's window has gone and the bridge is down (a
   hidden MW2 window stalled its loop, so it never noticed and play.bat kept running).
 
+- `0040-rimworld-only-rimworld-pictures.patch` (M22): pawns are only ever drawn as RimWorld's
+  pictures of them. MW2 soldiers are off (`MW2_SOLDIERS`) and the coloured box figures are
+  gone; a pawn whose picture has not arrived or loaded is not shown, and one whose new
+  picture is loading keeps its old one. `RWMW2_RIMWORLD_PAWNS` is gone.
+
 If the engine changes grow large, switch to a real fork and point `versions.json` at it.

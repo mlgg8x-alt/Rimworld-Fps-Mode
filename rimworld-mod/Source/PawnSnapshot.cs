@@ -92,8 +92,7 @@ namespace RimWorldMW2
                     .Num("z", pos.z)
                     .Num("rot", corpse.Rotation.AsAngle)
                     .Str("stance", "prone");
-                if (pawn.RaceProps.Humanlike) PawnArt.Art(pawn, json);
-                else Art(pawn, json);
+                Pictures(pawn, json);
                 float angle;
                 try { angle = pawn.Drawer.renderer.BodyAngle(PawnRenderFlags.None); }
                 catch { angle = 90f; }
@@ -119,8 +118,7 @@ namespace RimWorldMW2
                 .Str("stance", pawn.Downed ? "prone" : "stand");
             string weapon = pawn.equipment?.Primary?.def?.defName;
             if (weapon != null) json.Str("weapon", weapon);
-            if (pawn.RaceProps.Humanlike) PawnArt.Art(pawn, json);
-            else Art(pawn, json);
+            Pictures(pawn, json);
             int hurt = Hurt.Of(pawn);
             if (hurt > 0) json.Num("hurt", (long)hurt);
             // M15: lying down (in bed, asleep, downed), head the way RimWorld turns the body.
@@ -175,6 +173,17 @@ namespace RimWorldMW2
         }
 
         /// <summary>
+        /// RimWorld's pictures of <paramref name="pawn"/>: a person's portrait, else (when
+        /// RimWorld could not draw one) their body as drawn on the map; an animal's or mech's
+        /// body. IW4L shows a pawn only as these (M22).
+        /// </summary>
+        private static void Pictures(Pawn pawn, Json json)
+        {
+            if (!pawn.RaceProps.Humanlike) Art(pawn, json);
+            else if (!PawnArt.Art(pawn, json) && PawnArt.CouldNotDraw(pawn)) Art(pawn, json);
+        }
+
+        /// <summary>
         /// An animal's or mech's own pictures, facing north, east and south (west is east
         /// mirrored), cut out, and how big RimWorld draws them in cells.
         /// </summary>
@@ -189,12 +198,17 @@ namespace RimWorldMW2
                 int east = TextureExport.Of(body.MatAt(Rot4.East, pawn), flip: body.EastFlipped, cutout: true);
                 int south = TextureExport.Of(body.MatAt(Rot4.South, pawn), cutout: true);
                 if (north < 0 && east < 0 && south < 0) return;
+                // A side RimWorld has no picture for shows another side, not nothing (M22).
+                int any = south >= 0 ? south : east >= 0 ? east : north;
+                if (north < 0) north = any;
+                if (east < 0) east = any;
+                if (south < 0) south = any;
                 json.Raw("art", "[" + north + "," + east + "," + south + "]")
                     .Raw("draw", "[" + F(body.drawSize.x) + "," + F(body.drawSize.y) + "]");
             }
             catch
             {
-                // Art some mods draw their own way: the box figure stays.
+                // Art some mods draw their own way: IW4L shows nothing for it.
             }
         }
 

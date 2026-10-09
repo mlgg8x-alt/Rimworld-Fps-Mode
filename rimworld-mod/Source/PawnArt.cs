@@ -28,12 +28,15 @@ namespace RimWorldMW2
         /// <summary>A person's picture facing south (M15: one being carried); -1 when RimWorld
         /// could not draw them yet.</summary>
         public static int South(Pawn pawn) => Of(pawn)?[2] ?? -1;
-        /// <summary>Pictures for more than this many people at once are left to MW2's soldiers.</summary>
-        private const int MostPeople = 200;
+        /// <summary>Pictures kept for at most this many people at once; the longest unseen are
+        /// forgotten first.</summary>
+        private const int MostPeople = 400;
 
         /// <summary>New people drawn in one snapshot at most: a raid's arrive over a few
-        /// snapshots rather than in one long stall (M15).</summary>
-        private const int NewPerSnapshot = 8;
+        /// snapshots rather than in one long stall (M15). M22: 8 left a big raid half drawn
+        /// for seconds, shown meanwhile as MW2 soldiers and boxes; now nobody is shown before
+        /// their picture, so it comes sooner.</summary>
+        private const int NewPerSnapshot = 24;
         /// <summary>Seconds before trying again a person RimWorld could not draw.</summary>
         private const float RetrySeconds = 2f;
 
@@ -54,16 +57,23 @@ namespace RimWorldMW2
 
         /// <summary>
         /// A person's own pictures on <paramref name="json"/>, as RimWorld draws them: facing
-        /// north, east and south, cut out, and how many cells they span. Nothing when RimWorld
-        /// could not draw them, leaving IW4L its MW2 soldier.
+        /// north, east and south, cut out, and how many cells they span. False when there are
+        /// none yet: not drawn yet (IW4L shows nobody until then), or RimWorld could not draw
+        /// their portrait (<see cref="CouldNotDraw"/>).
         /// </summary>
-        public static void Art(Pawn pawn, Json json)
+        public static bool Art(Pawn pawn, Json json)
         {
             int[] art = Of(pawn);
-            if (art == null) return;
+            if (art == null) return false;
             json.Raw("art", "[" + art[0] + "," + art[1] + "," + art[2] + "]")
                 .Raw("draw", "[" + F(Cells) + "," + F(Cells) + "]");
+            return true;
         }
+
+        /// <summary>Whether RimWorld was asked for this person's portrait and could not draw it
+        /// (some mods' people): their body as RimWorld draws it on the map stands in (M22).</summary>
+        public static bool CouldNotDraw(Pawn pawn) =>
+            drawn.TryGetValue(pawn.ThingID, out Drawn had) && had.art == null;
 
         /// <summary>The three pictures of <paramref name="pawn"/>, drawn now if their look
         /// changed since last time; null when RimWorld could not draw them.</summary>

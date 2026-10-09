@@ -1,0 +1,282 @@
+diff --git a/crates/rimworld_world/src/lib.rs b/crates/rimworld_world/src/lib.rs
+index fed8974..2ab9494 100644
+--- a/crates/rimworld_world/src/lib.rs
++++ b/crates/rimworld_world/src/lib.rs
+@@ -815,10 +815,12 @@ struct Figure {
+     downed: bool,
+     /// The MW2 version of the gun in its hands, by script name.
+     gun: Option<&'static str>,
+-    /// An animal's or mech's RimWorld pictures, north, east and south, and their size in
+-    /// cells: see [`card`].
++    /// Its RimWorld pictures, north, east and south, and their size in cells: see [`card`].
++    /// Everyone on the floor is drawn as these and only these (M22).
+     art: Option<[i32; 3]>,
+     draw: Option<[f32; 2]>,
++    /// The pictures it had before, shown while new ones (downed, new clothes) load (M22).
++    was: Option<([i32; 3], [f32; 2])>,
+     /// How many times RimWorld says it has been hurt, and seconds left of its red flash (M12).
+     hurt: u32,
+     flash: f32,
+@@ -1238,7 +1240,7 @@ fn update(
+         floor.targets.iter().enumerate().map(|(key, (_, _, bounds))| (key as u64, *bounds)).collect(),
+     );
+     // RimWorld's own pictures for its plants: then the trees are pictures, not MW2 models.
+-    let plant_pictures = rimworld_pictures().1;
++    let plant_pictures = rimworld_plants();
+     // Not the player's own colonist: that is the player.
+     let playing = floor.playing.as_deref();
+     view.entity_meshes[0] = figure_mesh(
+@@ -1517,7 +1519,7 @@ fn targets(figures: &HashMap<String, Figure>, playing: Option<&str>, cutouts: &H
+         .filter(|(id, figure)| Some(id.as_str()) != playing && !figure.dead)
+         .map(|(id, figure)| {
+             // Drawn as its RimWorld picture: as big as that.
+-            let drawn = card(figure, cutouts, None, people).map(|card| {
++            let drawn = picture(figure, cutouts, None, people).map(|card| {
+                 let (w, h) = if figure.downed { (card.height, card.width) } else { (card.width, card.height) };
+                 (f64::from(w) * 0.35, f64::from(h))
+             });
+@@ -3066,9 +3068,9 @@ fn figure_of(pawn: &PawnState, size: i32) -> Figure {
+         // Asleep or in bed lies down as the downed do (M15).
+         downed: pawn.downed || pawn.lie.is_some(),
+         gun: mw2_weapon(pawn.weapon.as_deref()),
+-        // People too, once RimWorld draws them (M10): `RWMW2_RIMWORLD_PAWNS=0` keeps MW2 soldiers.
+-        art: pawn.art.filter(|_| pawn.kind.as_deref() != Some("humanlike") || rimworld_pictures().0),
++        art: pawn.art,
+         draw: pawn.draw,
++        was: None,
+         hurt: pawn.hurt.unwrap_or(0),
+         flash: 0.0,
+         lie: pawn.lie,
+@@ -3098,7 +3100,14 @@ fn follow_pawns(figures: &mut HashMap<String, Figure>, pawns: &[PawnState], size
+                 let yaw = turn_towards(figure.yaw, want, turn);
+                 // Hurt since the last snapshot: red, fading, as RimWorld flashes it.
+                 let flash = if target.hurt > figure.hurt { HURT_FLASH } else { (figure.flash - dt).max(0.0) };
+-                *figure = Figure { x, z, yaw, vx, vz, flash, ..target };
++                // A snapshot without pictures keeps the ones it had; new pictures keep the
++                // old ones to show until they have loaded (M22).
++                let (art, draw) = (target.art.or(figure.art), target.draw.or(figure.draw));
++                let was = match (figure.art, figure.draw) {
++                    (Some(old), Some(size)) if Some(old) != art => Some((old, size)),
++                    _ => figure.was,
++                };
++                *figure = Figure { x, z, yaw, vx, vz, flash, art, draw, was, ..target };
+             }
+             _ => {
+                 figures.insert(pawn.id.clone(), target);
+@@ -3273,6 +3282,16 @@ fn card(figure: &Figure, cutouts: &HashMap<u16, [f32; 4]>, eye: Option<[f64; 3]>
+     Some(Card { tex, flip, bounds, width: width * scale, height: height * scale })
+ }
+ 
++/// How `figure` is drawn: its RimWorld picture, else the one it had while the new one loads;
++/// None while RimWorld has not drawn it yet, and then it is not shown at all (M22: a raid
++/// came as RimWorld pictures, MW2 soldiers and coloured boxes at once).
++fn picture(figure: &Figure, cutouts: &HashMap<u16, [f32; 4]>, eye: Option<[f64; 3]>, people: f32) -> Option<Card> {
++    card(figure, cutouts, eye, people).or_else(|| {
++        let (art, draw) = figure.was?;
++        card(&Figure { art: Some(art), draw: Some(draw), ..figure.clone() }, cutouts, eye, people)
++    })
++}
++
+ /// How much people grow to stand as tall as an MW2 soldier: the middle of what each person
+ /// standing needs, from the side, or [`PEOPLE_SCALE`] while there is nobody to measure.
+ fn people_scale<'a>(figures: impl Iterator<Item = &'a Figure>, cutouts: &HashMap<u16, [f32; 4]>) -> f32 {
+@@ -3416,16 +3435,15 @@ fn add_items(vertices: &mut Vec<Vertex>, indices: &mut Vec<u32>, cards: &Cards,
+     }
+ }
+ 
+-/// Whether RimWorld's own pictures are used for its people and its plants, rather than MW2's
+-/// soldiers and tree models: both on unless the environment says otherwise.
+-fn rimworld_pictures() -> (bool, bool) {
+-    static ON: std::sync::OnceLock<(bool, bool)> = std::sync::OnceLock::new();
++/// Whether RimWorld's own pictures are used for its plants, rather than MW2's tree models: on
++/// unless `RWMW2_RIMWORLD_PLANTS=0`. People are always RimWorld's pictures (M22).
++fn rimworld_plants() -> bool {
++    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+     *ON.get_or_init(|| {
+-        let on = |name: &str| !matches!(std::env::var(name).map(|v| v.trim().to_lowercase()).as_deref(), Ok("0" | "off" | "false"));
+-        let (people, plants) = (on("RWMW2_RIMWORLD_PAWNS"), on("RWMW2_RIMWORLD_PLANTS"));
+-        diag::info!(Zone, "rimworld: RimWorld's own pictures for people {people}, for plants {plants}");
+-        println!("[rimworld] RimWorld's own pictures: people {people}, plants {plants}");
+-        (people, plants)
++        let plants = !matches!(std::env::var("RWMW2_RIMWORLD_PLANTS").map(|v| v.trim().to_lowercase()).as_deref(), Ok("0" | "off" | "false"));
++        diag::info!(Zone, "rimworld: RimWorld's own pictures for plants {plants}");
++        println!("[rimworld] RimWorld's own pictures: people always, plants {plants}");
++        plants
+     })
+ }
+ 
+@@ -3754,81 +3772,21 @@ fn figure_mesh<'a>(figures: impl Iterator<Item = &'a Figure>, tracers: &[Tracer]
+         }
+     }
+     for figure in figures {
+-        if let Some(card) = card(figure, cards.cutouts, cards.eye, cards.people) {
+-            let at = [figure.x, figure.z];
+-            let red = 1.0 - HURT_RED * (figure.flash / HURT_FLASH).clamp(0.0, 1.0);
+-            let color = [1.0, red, red, 1.0];
+-            let lie = figure.downed.then(|| figure.lie.unwrap_or(90.0));
+-            let lift = if figure.bed { BED_TOP } else { 0.0 };
+-            add_card(&mut vertices, &mut indices, at, cards.eye, card.tex, card.bounds, [card.width, card.height], card.flip, lie, lift, color);
+-            if let Some(carry) = &figure.carry {
+-                add_carried(&mut vertices, &mut indices, figure, carry, cards);
+-            }
+-            continue;
+-        }
+-        let body = match (figure.side, figure.kind) {
+-            (SideColour::Player, _) => [0.22, 0.45, 0.95],
+-            (SideColour::Hostile, _) => [0.90, 0.16, 0.14],
+-            (SideColour::Neutral, Kind::Animal) => [0.62, 0.47, 0.30],
+-            (SideColour::Neutral, _) => [0.95, 0.80, 0.25],
+-        };
+-        let skin = [0.93, 0.78, 0.62];
+-        let dark = [0.12, 0.12, 0.14];
+-        let mut put = |forward: f32, right: f32, y: f32, [w, d, h]: [f32; 3], colour: [f32; 3]| {
+-            add_box(&mut vertices, &mut indices, figure, [forward, right, y], [w, d, h], colour);
+-        };
+-        match (figure.kind, figure.downed) {
+-            // Lying along its facing, head first.
+-            (Kind::Humanlike, true) => {
+-                put(-0.2, 0.0, 0.0, [0.5, 1.2, 0.3], body);
+-                put(0.6, 0.0, 0.0, [0.36, 0.36, 0.3], skin);
+-            }
+-            // About an MW2 soldier's height: a body, a head and a visor showing the facing.
+-            (Kind::Humanlike, false) => {
+-                put(0.0, 0.0, 0.0, [0.5, 0.3, 1.45], body);
+-                put(0.0, 0.0, 1.45, [0.36, 0.36, 0.36], skin);
+-                put(0.2, 0.0, 1.58, [0.24, 0.06, 0.08], dark);
+-            }
+-            (Kind::Animal, downed) => {
+-                let h = if downed { 0.3 } else { 0.6 };
+-                put(0.0, 0.0, 0.0, [0.5, 0.9, h], body);
+-                put(0.55, 0.0, h * 0.6, [0.3, 0.3, 0.3], body);
+-            }
+-            (Kind::Mech, downed) => {
+-                let h = if downed { 0.4 } else { 1.6 };
+-                let grey = body.map(|c| c * 0.5);
+-                put(0.0, 0.0, 0.0, [0.8, 0.8, h], grey);
+-                put(0.42, 0.0, h * 0.75, [0.3, 0.06, 0.1], [1.0, 0.2, 0.1]);
+-            }
+-            (Kind::Other, _) => put(0.0, 0.0, 0.0, [0.5, 0.5, 0.5], body),
++        // Only as RimWorld draws it (M22): nobody stands as a box while their picture loads.
++        let Some(card) = picture(figure, cards.cutouts, cards.eye, cards.people) else { continue };
++        let at = [figure.x, figure.z];
++        let red = 1.0 - HURT_RED * (figure.flash / HURT_FLASH).clamp(0.0, 1.0);
++        let color = [1.0, red, red, 1.0];
++        let lie = figure.downed.then(|| figure.lie.unwrap_or(90.0));
++        let lift = if figure.bed { BED_TOP } else { 0.0 };
++        add_card(&mut vertices, &mut indices, at, cards.eye, card.tex, card.bounds, [card.width, card.height], card.flip, lie, lift, color);
++        if let Some(carry) = &figure.carry {
++            add_carried(&mut vertices, &mut indices, figure, carry, cards);
+         }
+     }
+     (bytemuck::cast_slice(&vertices).to_vec(), indices)
+ }
+ 
+-/// A box on a figure: centred `forward` and `right` blocks from it along its
+-/// facing, from height `y`, `[width, depth, height]` blocks, all six faces.
+-fn add_box(
+-    vertices: &mut Vec<Vertex>,
+-    indices: &mut Vec<u32>,
+-    figure: &Figure,
+-    [forward, right, y]: [f32; 3],
+-    [w, d, h]: [f32; 3],
+-    colour: [f32; 3],
+-) {
+-    // Facing north (block -Z) at yaw 0, turning clockwise seen from above.
+-    let yaw = figure.yaw.to_radians();
+-    let (ahead, side) = ([yaw.sin(), -yaw.cos()], [yaw.cos(), yaw.sin()]);
+-    let at = |f: f32, r: f32, up: f32| {
+-        [
+-            figure.x + ahead[0] * (forward + f) + side[0] * (right + r),
+-            y + up,
+-            figure.z + ahead[1] * (forward + f) + side[1] * (right + r),
+-        ]
+-    };
+-    push_box(vertices, indices, at, [d / 2.0, w / 2.0, h], colour);
+-}
+-
+ /// A box through `at`, which turns `(forward, right, up)` into a block point: forward
+ /// `-hd..hd`, right `-hw..hw`, up `0..h`, all six faces with Minecraft's shades.
+ fn push_box(
+@@ -4071,8 +4029,13 @@ fn soldier_transform(origin: [f64; 3], figure: &Figure) -> Transform {
+     Transform::from_translation(Vec3::from_array(at)).with_rotation(Quat::from_rotation_z((90.0 - figure.yaw).to_radians()))
+ }
+ 
++/// Whether people may stand as MW2 soldiers: no (M22). Everyone is RimWorld's picture of
++/// them; a raid showed RimWorld pictures, MW2 soldiers and boxes at once while its pictures
++/// were still being drawn. The soldiers stay here, off, should they be wanted again.
++const MW2_SOLDIERS: bool = false;
++
+ /// Puts an MW2 soldier on each person on the floor (not the one the player plays), moves it
+-/// with them, and takes it away when they go.
++/// with them, and takes it away when they go; never while [`MW2_SOLDIERS`] is off.
+ #[allow(clippy::too_many_arguments)]
+ fn place_soldiers(
+     mut commands: Commands,
+@@ -4086,7 +4049,7 @@ fn place_soldiers(
+     mut models: Query<(&mut render_scene::WorldScriptModelInstance, &mut Transform)>,
+     mut soldiers: Local<Soldiers>,
+ ) {
+-    let ready = floor.active && bodies.is_some() && xanims.is_some() && catalog.is_some();
++    let ready = MW2_SOLDIERS && floor.active && bodies.is_some() && xanims.is_some() && catalog.is_some();
+     if !ready {
+         for (_, soldier) in soldiers.by_pawn.drain() {
+             commands.entity(soldier.entity).despawn();
+@@ -4130,7 +4093,7 @@ fn place_soldiers(
+     }
+     let has = |name: &str| matches!(catalog.get_name(name), Some(asset_world::MapXModelSceneAsset::Iw4(_)));
+     // Someone RimWorld drew for us stands as that picture, not as an MW2 soldier (M10).
+-    let pictured = |figure: &Figure| rimworld_pictures().0 && figure.art.is_some();
++    let pictured = |figure: &Figure| figure.art.is_some();
+     let playing = floor.playing.clone();
+     let slots = assets::rimworld_soldiers::soldier_slots();
+     let looks = link.as_deref().and_then(|link| link.looks.clone());
+@@ -4435,7 +4398,7 @@ fn place_plants(
+     });
+     // RimWorld's own pictures stand where the trees are (M10): no MW2 models, and the trees
+     // are no longer blocks either.
+-    if rimworld_pictures().1 && link.as_deref().is_some_and(|link| link.plant_art.is_some()) {
++    if rimworld_plants() && link.as_deref().is_some_and(|link| link.plant_art.is_some()) {
+         for (_, plant) in plants.by_cell.drain() {
+             commands.entity(plant.entity).try_despawn();
+         }
+@@ -5613,16 +5576,30 @@ mod tests {
+     }
+ 
+     #[test]
+-    fn a_standing_person_is_three_boxes_facing_east() {
+-        let figure = figure_of(&pawn("a", 10.5, 10.5), 250);
+-        let (bytes, indices) = figure_mesh(std::iter::once(&figure), &[], &[], &no_cards(), 250);
+-        let vertices: &[Vertex] = bytemuck::cast_slice(&bytes);
+-        assert_eq!(indices.len(), 3 * 6 * 6);
+-        // The visor (the last box) is east of the body: rot 90 faces east.
+-        let visor_x = vertices[vertices.len() - 24..].iter().map(|v| v.position[0]).sum::<f32>() / 24.0;
+-        assert!(visor_x > figure.x + 0.1, "{visor_x}");
+-        let top = vertices.iter().map(|v| v.position[1]).fold(0.0, f32::max);
+-        assert!((top - 1.81).abs() < 1e-3);
++    fn people_are_only_ever_their_rimworld_pictures() {
++        let mut cutouts = HashMap::new();
++        for tex in 1..=3u16 {
++            cutouts.insert(tex, [0.25, 0.0, 0.75, 1.0]);
++        }
++        let cards = Cards { cutouts: &cutouts, ..no_cards() };
++        let quads = |figures: &HashMap<String, Figure>| figure_mesh(figures.values(), &[], &[], &cards, 250).1.len() / 12;
++        // Not drawn by RimWorld yet: not shown at all, no box and no soldier.
++        let mut figures = HashMap::new();
++        follow_pawns(&mut figures, &[pawn("a", 10.5, 10.5)], 250, 0.016);
++        assert_eq!(quads(&figures), 0);
++        assert!(!MW2_SOLDIERS, "nobody stands as an MW2 soldier");
++        // Drawn: its picture.
++        let drawn = PawnState { art: Some([1, 2, 3]), draw: Some([2.0, 2.0]), ..pawn("a", 10.5, 10.5) };
++        follow_pawns(&mut figures, std::slice::from_ref(&drawn), 250, 0.016);
++        assert_eq!(quads(&figures), 1);
++        // A snapshot without pictures keeps them.
++        follow_pawns(&mut figures, &[pawn("a", 10.5, 10.5)], 250, 0.016);
++        assert_eq!(figures["a"].art, Some([1, 2, 3]));
++        // Downed, new pictures not loaded yet: the old ones show meanwhile.
++        let downed = PawnState { art: Some([7, 8, 9]), downed: true, ..drawn };
++        follow_pawns(&mut figures, std::slice::from_ref(&downed), 250, 0.016);
++        assert_eq!(quads(&figures), 1);
++        assert_eq!(figures["a"].was, Some(([1, 2, 3], [2.0, 2.0])));
+     }
+ 
+     #[test]
