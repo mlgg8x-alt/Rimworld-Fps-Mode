@@ -1,0 +1,1073 @@
+diff --git a/crates/frame/src/minecraft_ui.rs b/crates/frame/src/minecraft_ui.rs
+index 41cebc0..e4cc3ee 100644
+--- a/crates/frame/src/minecraft_ui.rs
++++ b/crates/frame/src/minecraft_ui.rs
+@@ -101,6 +101,12 @@ pub struct MinecraftUi {
+     /// A block world other than Minecraft's shows `minimap` without the
+     /// rest of the Minecraft HUD (RimWorld x MW2's flat floor).
+     pub floor_minimap: bool,
++    /// Something else shows over the minimap's corner (RimWorld x MW2: RimWorld's own
++    /// window), so no minimap is drawn.
++    pub minimap_hidden: bool,
++    /// The held gun's clip holds this many rounds, not MW2's (RimWorld x MW2: a RimWorld
++    /// burst), and it is never low on ammo.
++    pub clip_rounds: Option<i32>,
+ }
+ 
+ /// The player's own MW2 body, drawn standing in the inventory's character
+diff --git a/crates/hud/src/compass.rs b/crates/hud/src/compass.rs
+index 9be357b..b5294f1 100644
+--- a/crates/hud/src/compass.rs
++++ b/crates/hud/src/compass.rs
+@@ -151,6 +151,11 @@ pub(crate) fn update_compass(
+         hide(&mut pass);
+         return;
+     };
++    // RimWorld's own window over the corner (M16): no minimap under it.
++    if minecraft.as_ref().is_some_and(|ui| ui.floor_minimap && ui.minimap_hidden) {
++        hide(&mut pass);
++        return;
++    }
+     // On a Minecraft map the minimap shows the Minecraft world.
+     let block_world = minecraft
+         .as_ref()
+diff --git a/crates/hud/src/weaponbar.rs b/crates/hud/src/weaponbar.rs
+index 220ecdb..b51b76e 100644
+--- a/crates/hud/src/weaponbar.rs
++++ b/crates/hud/src/weaponbar.rs
+@@ -292,6 +292,8 @@ struct OwnerDrawState<'a> {
+     /// On RimWorld's map (M15): only the gun and its ammo; no compass ring around a minimap
+     /// that is RimWorld's own, no grenades or killstreak slots.
+     rimworld: bool,
++    /// The gun reloads by itself, as RimWorld's do: no low ammo or reload warning (M16).
++    rimworld_clip: bool,
+ }
+ 
+ fn paint_owner(
+@@ -307,6 +309,9 @@ fn paint_owner(
+     {
+         return OwnerDrawPaint::Painted;
+     }
++    if state.rimworld_clip && args.item.owner_draw == OWNERDRAW_LOW_AMMO {
++        return OwnerDrawPaint::Painted;
++    }
+     match args.item.owner_draw {
+         171..=174 => paint_action_slot(state, args, frame),
+         OWNERDRAW_STOCK => paint_stock(state, &args, frame),
+@@ -683,7 +688,12 @@ pub(crate) fn update_weaponbar(
+     let meta = presented
+         .snapshot()
+         .and_then(|s| s.meta.for_client(local.0));
+-    let ammo = weapons.as_ref().and_then(|w| weaponbar_ammo(ps, w, meta));
++    let mut ammo = weapons.as_ref().and_then(|w| weaponbar_ammo(ps, w, meta));
++    // A RimWorld colonist's gun (M16): its clip is a RimWorld burst.
++    let rimworld_clip = client_input.minecraft.as_ref().and_then(|ui| ui.clip_rounds);
++    if let (Some(ammo), Some(rounds)) = (ammo.as_mut(), rimworld_clip) {
++        ammo.clip_size = rounds;
++    }
+     let viewmodel = get_viewmodel_weapon_index(ps);
+     let weapon_script = weapons
+         .as_ref()
+@@ -763,6 +773,7 @@ pub(crate) fn update_weaponbar(
+         north_yaw,
+         hide_ammo,
+         rimworld: client_input.minecraft.as_ref().is_some_and(|ui| ui.floor_minimap),
++        rimworld_clip: rimworld_clip.is_some(),
+     };
+ 
+     let mut list = crate::draw2d::Draw2dList::default();
+diff --git a/crates/render_anim/src/anim/viewmodel_controller.rs b/crates/render_anim/src/anim/viewmodel_controller.rs
+index b970843..d8fe71b 100644
+--- a/crates/render_anim/src/anim/viewmodel_controller.rs
++++ b/crates/render_anim/src/anim/viewmodel_controller.rs
+@@ -481,6 +481,10 @@ impl ViewmodelController {
+             state,
+             WeaponState::Reloading { .. } | WeaponState::ReloadStarting | WeaponState::ReloadEnding
+         );
++        // RimWorld x MW2: the reload lasts as long as the colonist's in RimWorld.
++        if reload_family && let Some(scale) = weapon_iw4::local_reload_scale() {
++            return timer_ms.map(|t| ((t as f32) * scale).round() as i32);
++        }
+         if !(reload_family
+             && weapon_iw4::perk_fastreload_eligible(
+                 self.predicted_perks0,
+diff --git a/crates/rimworld_bridge/src/lib.rs b/crates/rimworld_bridge/src/lib.rs
+index c0aaad3..c310b8a 100644
+--- a/crates/rimworld_bridge/src/lib.rs
++++ b/crates/rimworld_bridge/src/lib.rs
+@@ -123,6 +123,8 @@ pub struct RimworldLink {
+     pub rate: Option<f32>,
+     /// How the played colonist's gun fires in RimWorld, from the latest snapshot (M15).
+     pub player_gun: Option<GunTiming>,
++    /// RimWorld's own window shows over MW2's minimap corner (M16).
++    pub overlay: bool,
+     /// How brightly lamps light every roofed cell, from the latest `glow` (M12+).
+     pub glow: Option<Arc<Glow>>,
+     /// Counts changes to `glow` (M13: only the light changes, not the floor).
+@@ -177,13 +179,15 @@ pub struct Door {
+     pub open: u32,
+     /// Which way its leaves slide: 0 east and west, 1 north and south.
+     pub axis: u8,
++    /// The whole door's cells, `[x0, z0, x1, z1]`, for one wider than a cell (M16).
++    pub rect: Option<[i32; 4]>,
+ }
+ 
+ impl Doors {
+     pub fn new(doors: Vec<DoorState>, steps: u32) -> Self {
+         let cells = doors
+             .into_iter()
+-            .map(|door| ((door.at[0], door.at[1]), Door { open: door.open, axis: door.axis }))
++            .map(|door| ((door.at[0], door.at[1]), Door { open: door.open, axis: door.axis, rect: door.rect }))
+             .collect();
+         Self { cells, steps: steps.max(1) }
+     }
+@@ -531,6 +535,9 @@ fn drain_inbox(inbox: Res<RimworldInbox>, mut link: ResMut<RimworldLink>) {
+                 link.roofs = Some(Arc::new(Roofs { size, cells: cells.into_bytes(), hills }));
+                 link.world_revision += 1;
+             }
++            BridgeEvent::Received(Message::Overlay { shown }) => {
++                link.overlay = shown;
++            }
+             BridgeEvent::Received(Message::Glow { size, cells }) => {
+                 let [x, z] = size;
+                 if cells.len() != usize::try_from(x.max(0) * z.max(0)).unwrap_or(0) {
+diff --git a/crates/rimworld_world/src/detail.rs b/crates/rimworld_world/src/detail.rs
+index 04a3be8..c8fbe4f 100644
+--- a/crates/rimworld_world/src/detail.rs
++++ b/crates/rimworld_world/src/detail.rs
+@@ -14,7 +14,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
+ 
+ use rimworld_bridge::{BuildingState, Glow, Roofs, Skins, Terrain, roof, terrain};
+ 
+-use super::{BUILT_HEIGHT, CELL, ROCK_HEIGHT};
++use super::{BUILT_HEIGHT, CELL, FLOOR_TILES, ROCK_HEIGHT};
+ 
+ /// Small tiles in the atlas for RimWorld's art; a picture past these has none.
+ pub(crate) const SMALL_TILES: u16 = 1536;
+@@ -134,6 +134,8 @@ pub(crate) struct Detail {
+     /// The picture of a linked wall's face, by the picture of its top: see
+     /// [`side_pictures`].
+     sides: HashMap<u16, u16>,
++    /// The big tile holding each ground picture whole, by the picture: see [`floor_tiles`].
++    floor_tiles: HashMap<u16, u32>,
+     /// The highest block of any cell, plus one.
+     pub(crate) max_top: i32,
+     /// Building models, by the 16 by 16 chunk holding each building's middle.
+@@ -166,6 +168,7 @@ impl Detail {
+         glow: Option<&Glow>,
+     ) -> Self {
+         let sides = side_pictures(textures);
++        let floor_tiles = floor_tiles(textures).into_iter().filter(|&(_, slot)| slot < FLOOR_TILES).collect();
+         let textures = textures.len();
+         let cells = (size.max(0) * size.max(0)) as usize;
+         let rim = |z: i32| size - 1 - z;
+@@ -178,6 +181,7 @@ impl Detail {
+             floor: vec![NO_SKIN; cells],
+             model: vec![Model::None; cells],
+             sides,
++            floor_tiles,
+             max_top: ROCK_HEIGHT,
+             parts: HashMap::new(),
+             shelves: HashSet::new(),
+@@ -379,6 +383,11 @@ impl Detail {
+         self.index(x, z).map(|i| self.floor[i]).filter(|&s| s != NO_SKIN)
+     }
+ 
++    /// Which of the floor's big tiles holds ground picture `skin` whole, if one does.
++    pub(crate) fn floor_tile(&self, skin: u16) -> Option<u32> {
++        self.floor_tiles.get(&skin).copied()
++    }
++
+     pub(crate) fn model(&self, x: i32, z: i32) -> Model {
+         self.index(x, z).map_or(Model::None, |i| self.model[i])
+     }
+@@ -403,6 +412,18 @@ impl Detail {
+     }
+ }
+ 
++/// RimWorld's ground pictures sent whole (`..._floor`), by index, each with its place among
++/// them: the first [`FLOOR_TILES`] have a big tile of their own.
++pub(crate) fn floor_tiles(textures: &[String]) -> Vec<(u16, u32)> {
++    textures
++        .iter()
++        .enumerate()
++        .filter(|(_, name)| name.ends_with("_floor"))
++        .enumerate()
++        .filter_map(|(slot, (i, _))| Some((u16::try_from(i).ok()?, slot as u32)))
++        .collect()
++}
++
+ /// For each linked wall's picture of its top (`..._l15`, linking all ways), the picture of
+ /// its face (`..._l11`, open to the south), when RimWorld sent both: by index.
+ pub(crate) fn side_pictures(textures: &[String]) -> HashMap<u16, u16> {
+@@ -497,6 +518,141 @@ fn legs(inset: f32, thick: f32, height: f32) -> [Local; 4] {
+     ]
+ }
+ 
++/// A work bench's top on legs with a shelf under it, as RimWorld draws its benches, the
++/// worker's side at the front (`v` 0) and its height.
++fn bench() -> Vec<Local> {
++    let mut parts = vec![[0.0, 0.74, 0.0, 1.0, 0.84, 1.0], [0.03, 0.22, 0.08, 0.97, 0.28, 0.94]];
++    parts.extend(legs(0.02, 0.04, 0.74));
++    parts
++}
++
++/// Workshop machines, benches, furniture and the like by their def's lowercase name (M16:
++/// Ryan found the workshop's things looked nothing like themselves): boxes in the
++/// building's own frame, `u` across it, `v` from its front (the side a worker or sitter
++/// faces from) to its back, and the height its body collides to. `None` for anything else.
++fn workshop(name: &str) -> Option<(Vec<Local>, f32)> {
++    let has = |word: &str| name.contains(word);
++    let with = |mut parts: Vec<Local>, more: &[Local]| {
++        parts.extend_from_slice(more);
++        parts
++    };
++    Some(if has("toolcabinet") {
++        // Drawers below, a pegboard of tools up the wall behind.
++        (vec![[0.02, 0.0, 0.4, 0.98, 0.95, 1.0], [0.0, 0.95, 0.35, 1.0, 1.02, 1.0], [0.03, 1.02, 0.85, 0.97, 2.3, 1.0]], 0.95)
++    } else if has("electricsmelter") || has("crematorium") {
++        // A furnace: a heavy body, its hopper on top.
++        (vec![[0.04, 0.0, 0.06, 0.96, 1.45, 1.0], [0.3, 1.45, 0.3, 0.7, 1.85, 0.9], [0.25, 0.35, 0.0, 0.75, 0.95, 0.06]], 1.45)
++    } else if has("smithy") {
++        (with(bench(), &[[0.6, 0.84, 0.3, 0.97, 1.5, 1.0], [0.72, 1.5, 0.55, 0.88, 2.4, 0.75]]), 0.84)
++    } else if has("machining") {
++        (with(bench(), &[[0.38, 0.84, 0.5, 0.62, 1.45, 0.95], [0.08, 0.84, 0.6, 0.3, 1.05, 0.9]]), 0.84)
++    } else if has("tailor") {
++        (with(bench(), &[[0.38, 0.84, 0.45, 0.62, 1.2, 0.8], [0.7, 0.84, 0.3, 0.9, 0.95, 0.7]]), 0.84)
++    } else if has("stonecutter") {
++        (with(bench(), &[[0.3, 0.84, 0.2, 0.7, 0.98, 0.85], [0.47, 0.98, 0.3, 0.53, 1.35, 0.75]]), 0.84)
++    } else if has("sculpting") {
++        (with(bench(), &[[0.05, 0.84, 0.35, 0.35, 1.35, 0.9], [0.45, 0.84, 0.2, 0.9, 0.95, 0.8]]), 0.84)
++    } else if has("druglab") {
++        (with(bench(), &[[0.2, 0.84, 0.55, 0.3, 1.2, 0.7], [0.45, 0.84, 0.5, 0.55, 1.1, 0.65], [0.7, 0.84, 0.55, 0.85, 1.3, 0.75]]), 0.84)
++    } else if has("stove") {
++        // A closed range: oven below, hob on top, a hood over the back of a fuelled one.
++        let mut parts = vec![[0.02, 0.0, 0.06, 0.98, 0.84, 1.0], [0.0, 0.84, 0.02, 1.0, 0.9, 1.0]];
++        if has("fueled") {
++            parts.push([0.4, 0.9, 0.8, 0.6, 2.6, 0.97]);
++        }
++        (parts, 0.9)
++    } else if has("fabricationbench") || has("hitechresearch") || has("researchbench") {
++        // A long bench, screens and machines along its back.
++        let screens = if has("research") { [0.12, 0.84, 0.82, 0.88, 1.55, 0.9] } else { [0.05, 0.84, 0.7, 0.95, 1.75, 1.0] };
++        (with(bench(), &[screens]), 0.84)
++    } else if has("subcoreencoder") {
++        (with(bench(), &[[0.1, 0.84, 0.6, 0.9, 1.5, 0.95]]), 0.84)
++    } else if has("bioferriteshaper") {
++        (vec![[0.03, 0.0, 0.08, 0.97, 0.9, 0.95], [0.3, 0.9, 0.3, 0.75, 1.5, 0.9]], 0.9)
++    } else if has("serumcentrifuge") {
++        (vec![[0.1, 0.0, 0.1, 0.9, 0.7, 0.9], [0.25, 0.7, 0.25, 0.75, 1.2, 0.75], [0.42, 1.2, 0.42, 0.58, 1.35, 0.58]], 0.7)
++    } else if has("refinery") {
++        // A tall still between two tanks, a pipe over them.
++        (vec![
++            [0.36, 0.0, 0.3, 0.64, 1.9, 0.8],
++            [0.04, 0.0, 0.25, 0.3, 1.1, 0.7],
++            [0.7, 0.0, 0.25, 0.96, 1.1, 0.7],
++            [0.15, 1.75, 0.48, 0.85, 1.87, 0.56],
++            [0.15, 1.1, 0.48, 0.2, 1.75, 0.56],
++            [0.8, 1.1, 0.48, 0.85, 1.75, 0.56],
++        ], 1.1)
++    } else if has("geneassembler") {
++        (vec![[0.03, 0.0, 0.05, 0.97, 0.9, 0.95], [0.3, 0.9, 0.25, 0.7, 1.55, 0.8]], 0.9)
++    } else if has("geneextractor") {
++        // A pod to lie in beside its machine.
++        (vec![[0.03, 0.0, 0.03, 0.97, 0.55, 0.97], [0.05, 0.55, 0.08, 0.6, 1.25, 0.95], [0.65, 0.55, 0.1, 0.95, 1.5, 0.6]], 0.55)
++    } else if has("geneprocessor") {
++        (vec![[0.05, 0.0, 0.05, 0.95, 1.2, 0.95], [0.3, 1.2, 0.3, 0.7, 1.6, 0.7]], 1.2)
++    } else if has("genebank") {
++        (vec![[0.03, 0.0, 0.1, 0.97, 1.4, 0.9]], 1.4)
++    } else if has("chemreactor") {
++        // Three tanks.
++        (vec![[0.05, 0.0, 0.45, 0.55, 1.9, 0.95], [0.5, 0.0, 0.05, 0.95, 1.6, 0.6], [0.05, 0.0, 0.05, 0.45, 1.3, 0.45]], 1.9)
++    } else if has("firefoampopper") || has("popper") {
++        // A tank on a foot, its cap on top.
++        (vec![[0.2, 0.0, 0.2, 0.8, 0.22, 0.8], [0.33, 0.22, 0.33, 0.67, 1.3, 0.67], [0.38, 1.3, 0.38, 0.62, 1.45, 0.62]], 1.3)
++    } else if has("tradebeacon") || has("dropbeacon") {
++        (vec![[0.3, 0.0, 0.3, 0.7, 0.18, 0.7], [0.46, 0.0, 0.46, 0.54, 1.4, 0.54], [0.25, 1.2, 0.47, 0.75, 1.27, 0.53]], 0.18)
++    } else if has("commsconsole") {
++        // A console desk, its antennas and dish behind.
++        (vec![
++            [0.05, 0.0, 0.1, 0.95, 0.85, 0.7],
++            [0.05, 0.85, 0.45, 0.95, 1.3, 0.7],
++            [0.15, 0.0, 0.75, 0.22, 2.3, 0.82],
++            [0.72, 0.0, 0.76, 0.78, 2.0, 0.82],
++            [0.03, 1.8, 0.62, 0.4, 1.9, 0.98],
++        ], 0.85)
++    } else if has("grandthrone") || has("throne") {
++        // A seat facing the front, arms, a high back; a grand one on a dais.
++        let grand = has("grand");
++        let (a, b) = if grand { (0.25, 0.75) } else { (0.1, 0.9) };
++        let mut parts = vec![
++            [a + 0.05, 0.0, 0.15, b - 0.05, 0.6, 0.85],
++            [a, 0.0, 0.15, a + 0.08, 1.0, 0.85],
++            [b - 0.08, 0.0, 0.15, b, 1.0, 0.85],
++            [a, 0.0, 0.0, b, if grand { 2.8 } else { 2.2 }, 0.16],
++        ];
++        if grand {
++            parts = parts.into_iter().map(|[u0, y0, v0, u1, y1, v1]| [u0, y0 + 0.15, v0, u1, y1 + 0.15, v1]).collect();
++            parts.push([0.0, 0.0, 0.0, 1.0, 0.15, 1.0]);
++        }
++        (parts, 0.6)
++    } else if has("lectern") {
++        (vec![[0.4, 0.0, 0.4, 0.6, 1.15, 0.6], [0.25, 0.0, 0.3, 0.75, 0.08, 0.7], [0.18, 1.15, 0.22, 0.82, 1.32, 0.72]], 1.15)
++    } else if has("altar") {
++        (vec![[0.02, 0.0, 0.1, 0.98, 0.95, 0.9], [0.0, 0.95, 0.05, 1.0, 1.05, 0.95]], 1.05)
++    } else if has("reliquary") {
++        (vec![[0.05, 0.0, 0.1, 0.95, 0.6, 0.9], [0.18, 0.6, 0.25, 0.82, 1.3, 0.75], [0.15, 1.3, 0.2, 0.85, 1.4, 0.8]], 1.3)
++    } else if has("piano") || has("harpsichord") {
++        // A case on legs, the keys at the front, a grand's lid raised.
++        let mut parts = vec![[0.02, 0.6, 0.12, 0.98, 1.05, 0.98], [0.06, 0.6, 0.0, 0.94, 0.75, 0.14]];
++        parts.extend(legs(0.06, 0.06, 0.6));
++        if has("grand") {
++            parts.push([0.05, 1.05, 0.55, 0.95, 1.75, 0.6]);
++        }
++        (parts, 1.05)
++    } else if has("drum") {
++        (vec![[0.2, 0.0, 0.2, 0.8, 0.8, 0.8]], 0.8)
++    } else if has("harp") {
++        (vec![[0.3, 0.0, 0.3, 0.7, 0.2, 0.7], [0.35, 0.2, 0.45, 0.42, 2.0, 0.55], [0.42, 1.8, 0.45, 0.68, 1.95, 0.55], [0.62, 0.2, 0.47, 0.67, 1.8, 0.53]], 0.2)
++    } else if has("gong") {
++        (vec![[0.1, 0.0, 0.42, 0.16, 1.9, 0.58], [0.84, 0.0, 0.42, 0.9, 1.9, 0.58], [0.1, 1.9, 0.42, 0.9, 2.0, 0.58], [0.25, 0.5, 0.47, 0.75, 1.75, 0.53]], 0.0)
++    } else if has("banner") {
++        (vec![[0.46, 0.0, 0.46, 0.54, 2.6, 0.54], [0.2, 1.3, 0.48, 0.8, 2.5, 0.52]], 0.0)
++    } else if has("heater") {
++        (vec![[0.18, 0.0, 0.3, 0.82, 1.35, 0.75]], 1.35)
++    } else if has("multianalyzer") || has("vitalsmonitor") {
++        (vec![[0.15, 0.0, 0.2, 0.85, 1.4, 0.8]], 1.4)
++    } else {
++        return None;
++    })
++}
++
+ /// A building's model as boxes in its own frame, and the height of its body, for how it
+ /// collides. Shapes by what its def's name says it is; anything else is a box as tall as
+ /// it is cover.
+@@ -511,6 +667,10 @@ fn model_of(building: &BuildingState, fences: &HashSet<(i32, i32)>) -> (Vec<Loca
+         // Sleeping and work spots are marks on the ground.
+         parts.push([0.05, 0.0, 0.05, 0.95, 0.02, 0.95]);
+         body = 0.0;
++    } else if let Some((shape, height)) = workshop(&name) {
++        // M16: what a workshop holds, each made as what it is.
++        parts.extend(shape);
++        body = height;
+     } else if has("bedroll") {
+         parts.push([0.06, 0.0, 0.04, 0.94, 0.16, 0.96]);
+         body = 0.16;
+@@ -538,11 +698,10 @@ fn model_of(building: &BuildingState, fences: &HashSet<(i32, i32)>) -> (Vec<Loca
+         parts.push([0.2, 0.42, 0.2, 0.8, 0.52, 0.8]);
+         parts.extend(legs(0.22, 0.08, 0.42));
+         body = 0.52;
+-    } else if has("chair") || has("throne") {
+-        let throne = has("throne");
++    } else if has("chair") {
+         parts.push([0.15, 0.45, 0.15, 0.85, 0.55, 0.85]);
+         parts.extend(legs(0.16, 0.08, 0.45));
+-        parts.push([0.15, 0.55, 0.12, 0.85, if throne { 1.8 } else { 1.25 }, 0.2]);
++        parts.push([0.15, 0.55, 0.12, 0.85, 1.25, 0.2]);
+         body = 0.55;
+     } else if has("endtable") {
+         parts.push([0.08, 0.5, 0.08, 0.92, 0.58, 0.92]);
+@@ -686,6 +845,29 @@ fn unturn(part: Local, rot: u8) -> Local {
+ mod tests {
+     use super::*;
+ 
++    #[test]
++    fn workshop_things_are_made_as_what_they_are() {
++        let defs = [
++            "ToolCabinet", "ElectricSmelter", "ElectricSmithy", "TableMachining", "ElectricTailoringBench", "TableStonecutter",
++            "TableSculpting", "DrugLab", "ElectricStove", "FueledStove", "FabricationBench", "HiTechResearchBench", "SubcoreEncoder",
++            "BioferriteShaper", "SerumCentrifuge", "BiofuelRefinery", "GeneAssembler", "GeneExtractor", "GeneProcessor", "GeneBank",
++            "InfiniteChemreactor", "FirefoamPopper", "OrbitalTradeBeacon", "CommsConsole", "Throne", "GrandThrone", "Lectern",
++            "Altar_Medium", "Reliquary", "Piano", "Harpsichord", "Heater",
++        ];
++        for def in defs {
++            let (parts, body) = workshop(&def.to_ascii_lowercase()).unwrap_or_else(|| panic!("{def} has a model"));
++            assert!(parts.len() >= 1 && body >= 0.0, "{def}");
++            for [u0, y0, v0, u1, y1, v1] in parts {
++                assert!(u0 < u1 && y0 < y1 && v0 < v1, "{def}: a box with size");
++                assert!(u0 >= 0.0 && v0 >= 0.0 && u1 <= 1.0 && v1 <= 1.0, "{def}: within its cells");
++            }
++        }
++        // A tool cabinet stands against the wall behind it, taller than a dresser.
++        let (cabinet, _) = workshop("toolcabinet").unwrap();
++        assert!(cabinet.iter().any(|p| p[4] > 2.0 && p[2] >= 0.8));
++        assert!(workshop("dresser").is_none());
++    }
++
+     /// Names for `n` pictures.
+     fn names(n: usize) -> Vec<String> {
+         (0..n).map(|i| format!("Art{i}")).collect()
+diff --git a/crates/rimworld_world/src/lib.rs b/crates/rimworld_world/src/lib.rs
+index 13e933c..5f51870 100644
+--- a/crates/rimworld_world/src/lib.rs
++++ b/crates/rimworld_world/src/lib.rs
+@@ -185,15 +185,16 @@ const ROCK_HEIGHT: i32 = 4;
+ const BUILT_HEIGHT: i32 = 3;
+ /// A built roof's thickness, in blocks, on top of the walls.
+ const ROOF_THICKNESS: f32 = 0.25;
+-/// Cells a floor's RimWorld art spans before it repeats, and what the environment says
+-/// instead (`RWMW2_FLOOR_SPAN`).
+-const FLOOR_SPAN: i32 = 4;
+-fn floor_span() -> i32 {
+-    static SPAN: std::sync::OnceLock<i32> = std::sync::OnceLock::new();
+-    *SPAN.get_or_init(|| {
+-        std::env::var("RWMW2_FLOOR_SPAN").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(FLOOR_SPAN).clamp(1, 32)
+-    })
+-}
++/// Cells a floor's RimWorld art spans before it repeats: RimWorld lays its ground textures
++/// over the world, one across 16 cells (M16: paved tile is one tile a cell, 16 to a texture).
++const FLOOR_CELLS: i32 = 16;
++/// Big tiles holding RimWorld's ground art whole (`..._floor`, [`TILE`] pixels for
++/// [`FLOOR_CELLS`]), after the leaves: the first ground kinds RimWorld sends, which it sends
++/// most common first. The rest are a small tile cut from their top left corner,
++/// [`FLOOR_SMALL_CELLS`] cells of it, so they are the right size but repeat sooner.
++const TILE_FLOOR: u32 = TILE_LEAVES + 1;
++const FLOOR_TILES: u32 = BIG_TILES - TILE_FLOOR;
++const FLOOR_SMALL_CELLS: i32 = FLOOR_CELLS * SMALL as i32 / TILE as i32;
+ /// A cell grid line every this many cells, as RimWorld's own grid overlay.
+ const MAJOR_LINE: i32 = 10;
+ const FULL_BRIGHT: [u8; 2] = [15 * 16, 0];
+@@ -660,6 +661,8 @@ struct Figure {
+     /// clockwise from north; in a bed, so on top of it; and what it carries.
+     lie: Option<f32>,
+     bed: bool,
++    /// A corpse (M16): lying, and not shot at.
++    dead: bool,
+     carry: Option<rimworld_bridge::Carried>,
+ }
+ 
+@@ -987,6 +990,10 @@ fn update(
+     floor.view = floor.view.take().filter(|picture| picture.age < rimview::VIEW_SECONDS);
+     // The minimap shows RimWorld, else the floor; never the stand-in map.
+     if let Some(ui) = ui.as_deref_mut() {
++        // The colonist's clip, a RimWorld burst, for the HUD's ammo (M16).
++        ui.clip_rounds = floor.gun_clip.and(link.as_deref().and_then(|link| link.player_gun)).map(|gun| gun.burst.clamp(1, 1000) as i32);
++        // RimWorld's own window over the minimap's corner (M16): MW2 draws none there.
++        ui.minimap_hidden = link.as_deref().is_some_and(|link| link.overlay);
+         if let Some(picture) = floor.view.clone() {
+             ui.minimap = Some((picture.image, picture.north_west, picture.south_east));
+             ui.minimap_range = Some(picture.range);
+@@ -1260,9 +1267,9 @@ fn arm_player(floor: &mut FlatFloor, authority: &mut net::AuthorityWorld, local:
+ }
+ 
+ /// Fires the player's gun as RimWorld fires their colonist's (M15): its clip holds one
+-/// burst, its shots `between` apart, and once the burst is spent MW2 reloads and it holds
+-/// fire for RimWorld's cooldown and aiming time, at the game's speed `rate`. Its reserve never
+-/// runs out. `None` (no gun, or not playing) leaves MW2's own guns as they were.
++/// burst, its shots `between` apart, and once the burst is spent MW2 reloads, taking as long
++/// as RimWorld's cooldown and aiming time (M16), at the game's speed `rate`. Its reserve
++/// never runs out. `None` (no gun, or not playing) leaves MW2's own guns as they were.
+ fn fire_like_rimworld(floor: &mut FlatFloor, authority: &mut net::AuthorityWorld, local: sim::ClientId, gun: Option<rimworld_bridge::GunTiming>, rate: f32, dt: f32) {
+     let Some(gun) = gun else {
+         if floor.gun_clip.take().is_some() {
+@@ -1279,10 +1286,13 @@ fn fire_like_rimworld(floor: &mut FlatFloor, authority: &mut net::AuthorityWorld
+         && now < before
+         && before <= rounds
+     {
+-        floor.gun_hold = if now == 0 { gun.cooldown + gun.warmup } else { gun.between };
++        // The last of the burst: the reload that follows is RimWorld's wait.
++        floor.gun_hold = if now == 0 { 0.0 } else { gun.between };
+     }
+     floor.gun_clip = Some(clip.unwrap_or(0));
+-    sim::voxel::set_magazine(Some(sim::voxel::Magazine { client: local.0, rounds, hold: floor.gun_hold > 0.0 }));
++    let reload = (gun.cooldown + gun.warmup) / rate.max(0.1);
++    let reload_ms = (reload * 1000.0).round().clamp(100.0, 30_000.0) as i32;
++    sim::voxel::set_magazine(Some(sim::voxel::Magazine { client: local.0, rounds, hold: floor.gun_hold > 0.0, reload_ms }));
+ }
+ 
+ /// Each figure as bullets see it: pawn id, whether it is a standing person
+@@ -1291,7 +1301,7 @@ fn targets(figures: &HashMap<String, Figure>, playing: Option<&str>, cutouts: &H
+     let people = people_scale(figures.values(), cutouts);
+     let mut targets: Vec<_> = figures
+         .iter()
+-        .filter(|(id, _)| Some(id.as_str()) != playing)
++        .filter(|(id, figure)| Some(id.as_str()) != playing && !figure.dead)
+         .map(|(id, figure)| {
+             // Drawn as its RimWorld picture: as big as that.
+             let drawn = card(figure, cutouts, None, people).map(|card| {
+@@ -1558,6 +1568,8 @@ fn stop(floor: &mut FlatFloor, view: &mut MinecraftWorldView, ui: Option<&mut fr
+         ui.minimap = None;
+         ui.minimap_range = None;
+         ui.floor_minimap = false;
++        ui.minimap_hidden = false;
++        ui.clip_rounds = None;
+     }
+     sim::voxel::deactivate();
+     view.active = false;
+@@ -1916,6 +1928,8 @@ fn terrain_tile(code: u8) -> u32 {
+ enum Tex {
+     Big(u32),
+     Small(u16, [i32; 2]),
++    /// A big tile of RimWorld's ground, once across [`FLOOR_CELLS`] cells.
++    Floor(u32),
+ }
+ 
+ /// How light faces looking into cell `(x, z)` below the roofs are: see [`Detail::light`].
+@@ -1991,7 +2005,10 @@ fn add_block(mesh: &mut SectionMesh, lay: Lay, [x, y, z]: [i32; 3], cell: Cell,
+             (top, side)
+         }
+         Some(detail) if matches!(cell, Cell::Ground(_)) => {
+-            let floor = detail.floor(x, z).map(|s| Tex::Small(s, [floor_span() * CELL; 2]));
++            let floor = detail.floor(x, z).map(|s| match detail.floor_tile(s) {
++                Some(slot) => Tex::Floor(TILE_FLOOR + slot),
++                None => Tex::Small(s, [FLOOR_SMALL_CELLS * CELL; 2]),
++            });
+             (floor, floor)
+         }
+         _ => (None, None),
+@@ -2029,6 +2046,7 @@ fn add_block(mesh: &mut SectionMesh, lay: Lay, [x, y, z]: [i32; 3], cell: Cell,
+                     let within = |i: usize| ((start[i] as i32).rem_euclid(span[i]) as f32 + local[i]) / span[i] as f32;
+                     small_uv(index, [within(0), within(1)])
+                 }
++                Tex::Floor(tile) => floor_uv(tile, size, start, local),
+             };
+             mesh.vertices.push(SectionVertex {
+                 position,
+@@ -2136,6 +2154,23 @@ fn tile_uv(tile: u32, start: [f32; 2], local: [f32; 2]) -> [f32; 2] {
+     [at(0, TILE_COLUMNS), at(1, rows)]
+ }
+ 
++/// Where in the atlas a point of a floor's face lands: big tile `tile` laid as RimWorld lays
++/// its ground, from the south west corner of a map `size` cells across, the block at
++/// texture position `start` and `local` of the way across it.
++fn floor_uv(tile: u32, size: i32, start: [f32; 2], local: [f32; 2]) -> [f32; 2] {
++    let rows = TILES / TILE_COLUMNS;
++    let corner = [tile % TILE_COLUMNS, tile / TILE_COLUMNS];
++    let span = FLOOR_CELLS * CELL;
++    let inset = 0.5 / TILE as f32;
++    // The picture's top is north; RimWorld's z counts up from the south edge of the map.
++    let first = [start[0] as i32, start[1] as i32 - size * CELL];
++    let at = |i: usize, count: u32| {
++        let within = ((first[i].rem_euclid(span)) as f32 + local[i]) / span as f32;
++        (corner[i] as f32 + within.clamp(inset, 1.0 - inset)) / count as f32
++    };
++    [at(0, TILE_COLUMNS), at(1, rows)]
++}
++
+ /// Small tiles to a row of the atlas.
+ const SMALL_COLUMNS: u32 = TILE * TILE_COLUMNS / SMALL;
+ 
+@@ -2201,6 +2236,26 @@ fn read_picture(path: &std::path::Path) -> Option<RgbaImage> {
+     Some(picture)
+ }
+ 
++/// One of RimWorld's ground pictures (`..._floor`) whole, [`TILE`] square, read once.
++fn read_floor(path: &std::path::Path) -> Option<RgbaImage> {
++    static READ: std::sync::LazyLock<std::sync::Mutex<HashMap<std::path::PathBuf, RgbaImage>>> =
++        std::sync::LazyLock::new(Default::default);
++    if let Some(picture) = READ.lock().ok()?.get(path) {
++        return Some(picture.clone());
++    }
++    let picture = image::open(path).ok()?.to_rgba8();
++    let mut picture = if picture.dimensions() == (TILE, TILE) {
++        picture
++    } else {
++        image::imageops::resize(&picture, TILE, TILE, image::imageops::FilterType::Triangle)
++    };
++    for p in picture.pixels_mut() {
++        p[3] = 255;
++    }
++    READ.lock().ok()?.insert(path.to_path_buf(), picture.clone());
++    Some(picture)
++}
++
+ fn atlas_with(textures: Option<&Textures>) -> (Atlas, HashMap<u16, [f32; 4]>) {
+     atlas_after(None, textures)
+ }
+@@ -2225,7 +2280,15 @@ fn atlas_after(before: Option<(&Atlas, &HashMap<u16, [f32; 4]>, usize)>, texture
+         .iter()
+         .enumerate()
+         .map(|(index, name)| {
+-            (index >= from).then(|| read_picture(&std::path::Path::new(&textures.dir).join(format!("{name}.png")))).flatten()
++            let path = std::path::Path::new(&textures.dir).join(format!("{name}.png"));
++            if index < from {
++                return None;
++            }
++            if name.ends_with("_floor") {
++                let whole = read_floor(&path)?;
++                return Some(image::imageops::crop_imm(&whole, 0, 0, SMALL, SMALL).to_image());
++            }
++            read_picture(&path)
+         })
+         .collect();
+     let missing = (from..count).filter(|&i| pictures[i].is_none()).count();
+@@ -2253,12 +2316,29 @@ fn atlas_after(before: Option<(&Atlas, &HashMap<u16, [f32; 4]>, usize)>, texture
+         diag::info!(Zone, "rimworld: {faces} wall faces cut from RimWorld's linked wall art");
+     }
+     let mut painted = Vec::new();
++    let mut floors = Vec::new();
++    for (index, slot) in detail::floor_tiles(&textures.names[..count]) {
++        if usize::from(index) < from || slot >= FLOOR_TILES {
++            continue;
++        }
++        let path = std::path::Path::new(&textures.dir).join(format!("{}.png", textures.names[usize::from(index)]));
++        if let Some(whole) = read_floor(&path) {
++            let tile = TILE_FLOOR + slot;
++            for (x, y, p) in whole.enumerate_pixels() {
++                pixels.put_pixel(tile_x(tile) + x, tile_y(tile) + y, *p);
++            }
++            floors.push(tile);
++        }
++    }
+     for (index, (name, picture)) in textures.names.iter().zip(pictures).enumerate() {
+         let Some(picture) = picture else { continue };
+         if name.ends_with("_cut") {
+             if let Some(bounds) = cutout_bounds(&picture) {
+                 cutouts.insert(index as u16, bounds);
+             }
++            if let Ok(mut shapes) = SHAPES.lock() {
++                shapes.insert(index as u16, Arc::new(slabs(&picture)));
++            }
+             paint_cutout(&mut pixels, index as u32, &picture);
+         } else {
+             paint_small(&mut pixels, index as u32, &picture);
+@@ -2270,6 +2350,9 @@ fn atlas_after(before: Option<(&Atlas, &HashMap<u16, [f32; 4]>, usize)>, texture
+             for index in painted {
+                 remip_small(&pixels, mipmaps, index);
+             }
++            for tile in floors {
++                remip(&pixels, mipmaps, (tile_x(tile), tile_y(tile)), TILE);
++            }
+             (Atlas::from_pixels(pixels, std::mem::take(mipmaps)), cutouts)
+         }
+         None => (finish_atlas(pixels), cutouts),
+@@ -2584,10 +2667,15 @@ fn mip_pixel(from: &RgbaImage, x: u32, y: u32) -> Rgba<u8> {
+ 
+ /// Small tile `index`'s part of every mip level, made again from the level above it.
+ fn remip_small(pixels: &RgbaImage, mipmaps: &mut [RgbaImage], index: u32) {
+-    let (cx, cy) = small_corner(index);
++    remip(pixels, mipmaps, small_corner(index), SMALL);
++}
++
++/// The square at `(cx, cy)`, `side` pixels, made again in every mip level from the level
++/// above it.
++fn remip(pixels: &RgbaImage, mipmaps: &mut [RgbaImage], (cx, cy): (u32, u32), side_pixels: u32) {
+     for level in 0..mipmaps.len() {
+         let shift = level as u32 + 1;
+-        let (x0, y0, side) = (cx >> shift, cy >> shift, SMALL >> shift);
++        let (x0, y0, side) = (cx >> shift, cy >> shift, side_pixels >> shift);
+         let (above, rest) = mipmaps.split_at_mut(level);
+         let from = above.last().unwrap_or(pixels);
+         let to = &mut rest[0];
+@@ -2720,6 +2808,7 @@ fn figure_of(pawn: &PawnState, size: i32) -> Figure {
+         flash: 0.0,
+         lie: pawn.lie,
+         bed: pawn.bed,
++        dead: pawn.dead,
+         carry: pawn.carry.clone(),
+     }
+ }
+@@ -3156,9 +3245,76 @@ fn add_plants(vertices: &mut Vec<Vertex>, indices: &mut Vec<u32>, cards: &Cards,
+ /// How far from the eye buildings drawn as their standing picture are drawn, in blocks.
+ const STANDING_REACH: f32 = 200.0;
+ 
+-/// The buildings RimWorld sent a standing picture of (statues, thrones, lecterns,
+-/// instruments, poppers), each as that picture on its cells facing the eye, as wide as
+-/// RimWorld draws it and grown as people are (M15).
++/// Bands a statue's picture is cut into from top to bottom, to give it a body (M16).
++const SLAB_BANDS: u32 = 28;
++/// Columns of a band at least this share solid count as part of the statue there.
++const SLAB_COVER: f32 = 0.35;
++/// Gaps between solid columns narrower than this many pixels are closed.
++const SLAB_GAP: u32 = 3;
++/// How light each side of a statue is: lit from above and the south, as RimWorld's art.
++const SLAB_SHADE: [f32; 3] = [1.0, 0.86, 0.72];
++
++/// A box of a statue: `[left, top, right, bottom]` of its picture, from 0 to 1.
++type Slab = [f32; 4];
++
++/// Each cut-out picture's [`slabs`], by index, kept as the atlas is made: a statue's body.
++static SHAPES: std::sync::LazyLock<std::sync::Mutex<HashMap<u16, Arc<Vec<Slab>>>>> =
++    std::sync::LazyLock::new(Default::default);
++
++/// A statue's body from its picture (M16: a picture turned to the eye did not read as one):
++/// the picture cut into [`SLAB_BANDS`] bands from top to bottom, and each band into the runs
++/// of columns solid there. Each run is a box as deep as it is wide, wearing that part of the
++/// picture all round, as a turned piece is round.
++fn slabs(picture: &RgbaImage) -> Vec<Slab> {
++    let (w, h) = picture.dimensions();
++    let Some([_, top, _, bottom]) = cutout_bounds(picture) else { return Vec::new() };
++    let (y0, y1) = ((top * h as f32) as u32, ((bottom * h as f32).ceil() as u32).min(h));
++    let rows = (y1 - y0).max(1);
++    let bands = SLAB_BANDS.min(rows);
++    let mut out = Vec::new();
++    for band in 0..bands {
++        let (from, to) = (y0 + rows * band / bands, y0 + rows * (band + 1) / bands);
++        if to <= from {
++            continue;
++        }
++        let solid: Vec<bool> = (0..w)
++            .map(|x| {
++                let n = (from..to).filter(|&y| picture.get_pixel(x, y)[3] >= 128).count();
++                n as f32 >= (to - from) as f32 * SLAB_COVER
++            })
++            .collect();
++        let mut x = 0;
++        while x < w {
++            if !solid[x as usize] {
++                x += 1;
++                continue;
++            }
++            let start = x;
++            let mut end = x + 1;
++            while end < w {
++                if solid[end as usize] {
++                    end += 1;
++                } else if (end..(end + SLAB_GAP).min(w)).any(|i| solid[i as usize]) {
++                    end += 1;
++                } else {
++                    break;
++                }
++            }
++            while end > start + 1 && !solid[end as usize - 1] {
++                end -= 1;
++            }
++            if end - start >= 2 {
++                out.push([start as f32 / w as f32, from as f32 / h as f32, end as f32 / w as f32, to as f32 / h as f32]);
++            }
++            x = end;
++        }
++    }
++    out
++}
++
++/// The buildings RimWorld sent a standing picture of (statues and other art): each a body of
++/// [`slabs`] cut from that picture, as wide and tall as RimWorld draws it and grown as people
++/// are (M15), standing on its cells. One with no body to cut stands as its picture.
+ fn add_standing(vertices: &mut Vec<Vertex>, indices: &mut Vec<u32>, cards: &Cards, size: i32) {
+     let Some(detail) = cards.lay.and_then(|lay| lay.detail) else { return };
+     for standing in &detail.standing {
+@@ -3171,10 +3327,43 @@ fn add_standing(vertices: &mut Vec<Vertex>, indices: &mut Vec<u32>, cards: &Card
+             continue;
+         }
+         let scale = PICTURE_SCALE * cards.people;
+-        let width = standing.draw[0] * (bounds[2] - bounds[0]) * scale;
+-        let height = standing.draw[1] * (bounds[3] - bounds[1]) * scale;
++        let [w, h] = [standing.draw[0] * scale, standing.draw[1] * scale];
+         let light = standing.light;
+-        add_card(vertices, indices, [at.x, at.z], cards.eye, standing.tex, bounds, [width, height], standing.flip, None, 0.0, [light, light, light, 1.0]);
++        let shape = SHAPES.lock().ok().and_then(|shapes| shapes.get(&standing.tex).cloned());
++        let Some(shape) = shape.filter(|shape| !shape.is_empty()) else {
++            let size = [w * (bounds[2] - bounds[0]), h * (bounds[3] - bounds[1])];
++            add_card(vertices, indices, [at.x, at.z], cards.eye, standing.tex, bounds, size, standing.flip, None, 0.0, [light, light, light, 1.0]);
++            continue;
++        };
++        // No deeper than the cells it stands on.
++        let deep = standing.draw[1].min(standing.draw[0]).max(1.0) * CELL as f32 / 2.0;
++        for &[a, top, b, bottom] in shape.iter() {
++            let (a, b) = if standing.flip { (1.0 - b, 1.0 - a) } else { (a, b) };
++            let (left, right) = ((a - 0.5) * w, (b - 0.5) * w);
++            let (y0, y1) = ((bounds[3] - bottom) * h, (bounds[3] - top) * h);
++            let half = ((right - left) / 2.0).min(deep);
++            let (x0, x1, z0, z1) = (at.x + left, at.x + right, at.z - half, at.z + half);
++            let (u0, u1) = if standing.flip { (1.0 - a, 1.0 - b) } else { (a, b) };
++            let face = |vertices: &mut Vec<Vertex>, indices: &mut Vec<u32>, corners: [[f32; 3]; 4], uvs: [[f32; 2]; 4], shade: f32| {
++                let base = vertices.len() as u32;
++                let c = light * shade;
++                for (position, uv) in corners.into_iter().zip(uvs) {
++                    vertices.push(Vertex { position, uv: small_uv(standing.tex, uv), color: [c, c, c, 1.0], sky_light: 15.0, block_light: 0.0 });
++                }
++                indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
++                indices.extend([base, base + 2, base + 1, base, base + 3, base + 2]);
++            };
++            // The picture's band across each side: bottom left, bottom right, top right, top left.
++            let band = [[u0, bottom], [u1, bottom], [u1, top], [u0, top]];
++            let back = [[u1, bottom], [u0, bottom], [u0, top], [u1, top]];
++            face(vertices, indices, [[x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]], band, SLAB_SHADE[0]);
++            face(vertices, indices, [[x1, y0, z0], [x0, y0, z0], [x0, y1, z0], [x1, y1, z0]], back, SLAB_SHADE[2]);
++            face(vertices, indices, [[x1, y0, z1], [x1, y0, z0], [x1, y1, z0], [x1, y1, z1]], band, SLAB_SHADE[1]);
++            face(vertices, indices, [[x0, y0, z0], [x0, y0, z1], [x0, y1, z1], [x0, y1, z0]], band, SLAB_SHADE[1]);
++            // Its top: the colour along the band's top edge, from the middle of it.
++            let mid = [(u0 + u1) / 2.0, top + 0.5 / SMALL as f32];
++            face(vertices, indices, [[x0, y1, z1], [x1, y1, z1], [x1, y1, z0], [x0, y1, z0]], [mid; 4], SLAB_SHADE[0]);
++        }
+     }
+ }
+ 
+@@ -3184,34 +3373,44 @@ fn add_standing(vertices: &mut Vec<Vertex>, indices: &mut Vec<u32>, cards: &Card
+ fn add_doors(vertices: &mut Vec<Vertex>, indices: &mut Vec<u32>, cards: &Cards, size: i32) {
+     let Some(lay) = cards.lay else { return };
+     let (Some(doors), Some(detail)) = (lay.doors, lay.detail) else { return };
+-    let half = CELL as f32 / 2.0;
+     let top = DOOR_GAP as f32;
++    let c = CELL as f32;
+     for (x, z) in doors.cells() {
+         let (Some(door), Some(swing)) = (doors.at(x, z), doors.swing(x, z)) else { continue };
+-        let (bx, bz) = (x * CELL, (size - 1 - z) * CELL);
+-        let Some(tex) = detail.wall(bx, bz) else { continue };
+-        // How far each leaf has slid out of the doorway.
+-        let slid = swing * half;
+-        let (x0, z0) = (bx as f32, bz as f32);
++        // A door wider than a cell is one door (M16: a security door opened as two): drawn
++        // once, from its first cell, its two leaves meeting in the middle of all of it.
++        let [x0, z0, x1, z1] = door.rect.unwrap_or([x, z, x, z]);
++        if (x, z) != (x0, z0) {
++            continue;
++        }
++        let Some(tex) = detail.wall(x0 * CELL, (size - 1 - z0) * CELL) else { continue };
++        // The door in block space: west to east, north to south.
++        let (west, east) = (x0 as f32 * c, (x1 + 1) as f32 * c);
++        let (north, south) = ((size - 1 - z1) as f32 * c, (size - z0) as f32 * c);
+         if door.axis == 0 {
+-            // A door facing north or south: its leaves slide east and west.
+-            leaf(vertices, indices, tex, [x0 - slid, z0 + half], [x0 + half - slid, z0 + half], top);
+-            leaf(vertices, indices, tex, [x0 + half + slid, z0 + half], [x0 + CELL as f32 + slid, z0 + half], top);
++            // Facing north or south: its leaves slide east and west.
++            let (half, mid) = ((east - west) / 2.0, (north + south) / 2.0);
++            let slid = swing * half;
++            leaf(vertices, indices, tex, [west - slid, mid], [west + half - slid, mid], top, [0.0, 0.5]);
++            leaf(vertices, indices, tex, [west + half + slid, mid], [east + slid, mid], top, [0.5, 1.0]);
+         } else {
+-            leaf(vertices, indices, tex, [x0 + half, z0 - slid], [x0 + half, z0 + half - slid], top);
+-            leaf(vertices, indices, tex, [x0 + half, z0 + half + slid], [x0 + half, z0 + CELL as f32 + slid], top);
++            let (half, mid) = ((south - north) / 2.0, (west + east) / 2.0);
++            let slid = swing * half;
++            leaf(vertices, indices, tex, [mid, north - slid], [mid, north + half - slid], top, [0.0, 0.5]);
++            leaf(vertices, indices, tex, [mid, north + half + slid], [mid, south + slid], top, [0.5, 1.0]);
+         }
+     }
+ }
+ 
+ /// One of a door's leaves: an upright piece of its own picture from `from` to `to` (block
+-/// space) and `top` blocks high, seen from either side.
+-fn leaf(vertices: &mut Vec<Vertex>, indices: &mut Vec<u32>, tex: u16, from: [f32; 2], to: [f32; 2], top: f32) {
++/// space) and `top` blocks high, seen from either side, showing `across` of the picture's
++/// width (its half of the door).
++fn leaf(vertices: &mut Vec<Vertex>, indices: &mut Vec<u32>, tex: u16, from: [f32; 2], to: [f32; 2], top: f32, [u0, u1]: [f32; 2]) {
+     // Bottom left, bottom right, top right, top left, and the picture there. RimWorld draws a
+     // door from above, a leaf across the middle of its picture with nothing above or below,
+     // so only the middle band is stretched up the leaf.
+     let corners = [(from, 0.0), (to, 0.0), (to, top), (from, top)];
+-    let pictured = [[0.0, 0.55], [1.0, 0.55], [1.0, 0.45], [0.0, 0.45]];
++    let pictured = [[u0, 0.55], [u1, 0.55], [u1, 0.45], [u0, 0.45]];
+     let base = vertices.len() as u32;
+     for (([x, z], y), uv) in corners.into_iter().zip(pictured) {
+         vertices.push(Vertex {
+@@ -4218,7 +4417,7 @@ mod tests {
+     fn a_door_stands_in_the_way_until_rimworld_has_swung_it_open() {
+         // One cell with a door on it, facing north.
+         let terrain = Terrain { size: [1, 1], cells: b"+".to_vec() };
+-        let state = |open| rimworld_bridge::DoorState { at: [0, 0], open, axis: 0 };
++        let state = |open| rimworld_bridge::DoorState { at: [0, 0], open, axis: 0, rect: None };
+         let lay = |doors| Lay { size: 1, terrain: Some(&terrain), detail: None, doors };
+         // Before RimWorld says anything, a door is the gap under a lintel it was before M11.
+         assert_eq!(lay(None).cell(0, 0, 0), Cell::Air, "no word yet: walk through");
+@@ -4446,6 +4645,7 @@ mod tests {
+             stance: rimworld_bridge::Stance::Stand,
+             weapon: None,
+             downed: false,
++            dead: false,
+             faction: "player".into(),
+             art: None,
+             draw: None,
+@@ -4481,6 +4681,106 @@ mod tests {
+         let _ = std::fs::remove_dir_all(&dir);
+     }
+ 
++    #[test]
++    fn rimworld_floors_are_one_texture_across_sixteen_cells() {
++        // A paved floor's picture holds 16 tiles across: one a cell.
++        let tile = TILE_FLOOR;
++        let size = 250;
++        let u = |x: i32, local: f32| floor_uv(tile, size, [x as f32, 0.0], [local, 0.0])[0];
++        let tile_width = 1.0 / TILE_COLUMNS as f32;
++        let corner = (tile % TILE_COLUMNS) as f32 * tile_width;
++        // One cell (two blocks) is a sixteenth of the picture.
++        let cell = u(CELL, 0.5) - u(0, 0.5);
++        assert!((cell - tile_width / FLOOR_CELLS as f32).abs() < 1e-5, "{cell}");
++        // It repeats every 16 cells.
++        assert!((u(FLOOR_CELLS * CELL + 1, 0.5) - u(1, 0.5)).abs() < 1e-6);
++        assert!(u(0, 0.0) >= corner && u(FLOOR_CELLS * CELL - 1, 1.0) <= corner + tile_width);
++        // Down the map, the picture's rows fall on RimWorld's cells: the south edge of the
++        // map is the bottom of a repeat.
++        let v = |z: i32| floor_uv(tile, size, [0.0, z as f32], [0.0, 0.0])[1];
++        let rows = TILES / TILE_COLUMNS;
++        let top = (tile / TILE_COLUMNS) as f32 / rows as f32;
++        assert!((v(size * CELL) - top).abs() < 1e-4, "the map's south edge starts a repeat");
++        // The first big tiles hold ground pictures whole; the rest are cut down.
++        let names: Vec<String> = ["Wall_l15", "PavedTile_8C8C8C_floor", "Soil_FFFFFF_floor"].iter().map(|s| s.to_string()).collect();
++        assert_eq!(detail::floor_tiles(&names), vec![(1, 0), (2, 1)]);
++        assert_eq!(FLOOR_SMALL_CELLS, 4, "a small tile is a quarter of the picture across");
++        assert!(FLOOR_TILES >= 8);
++    }
++
++    #[test]
++    fn a_statue_is_cut_from_its_picture_into_a_body() {
++        // A figure on a plinth: a narrow body over a wide base, two legs between.
++        let picture = RgbaImage::from_fn(SMALL, SMALL, |x, y| {
++            let solid = match y {
++                0..20 => false,
++                20..70 => (54..74).contains(&x),
++                70..100 => (50..60).contains(&x) || (68..78).contains(&x),
++                100..120 => (30..98).contains(&x),
++                _ => false,
++            };
++            Rgba([200, 200, 200, if solid { 255 } else { 0 }])
++        });
++        let shape = slabs(&picture);
++        assert!(!shape.is_empty());
++        let width = |s: &Slab| s[2] - s[0];
++        let top = shape.iter().filter(|s| s[1] < 0.5).map(width).fold(0.0, f32::max);
++        let base = shape.iter().filter(|s| s[1] > 0.8).map(width).fold(0.0, f32::max);
++        assert!(base > top * 2.0, "the plinth is wider than the body: {base} {top}");
++        let legs = shape.iter().filter(|s| s[1] > 0.6 && s[3] < 0.77).count();
++        assert!(legs >= 2, "the legs stand apart");
++        assert!(shape.iter().all(|s| s[1] >= 20.0 / SMALL as f32 - 1e-4 && s[3] <= 120.0 / SMALL as f32 + 1e-4));
++    }
++
++    #[test]
++    fn a_wide_door_is_one_door() {
++        let doors = Doors::new(
++            vec![
++                rimworld_bridge::DoorState { at: [3, 4], open: 0, axis: 0, rect: Some([3, 4, 4, 4]) },
++                rimworld_bridge::DoorState { at: [4, 4], open: 0, axis: 0, rect: Some([3, 4, 4, 4]) },
++            ],
++            16,
++        );
++        let size = 10;
++        // RimWorld's rows, south first: the door's two cells wear picture 0.
++        let mut walls = vec![u16::from(b'.'); (size * size) as usize];
++        for x in 3..=4 {
++            walls[(4 * size + x) as usize] = u16::from(b'0');
++        }
++        let skins = rimworld_bridge::Skins { size: [size, size], walls, floors: Vec::new() };
++        let detail = Detail::new(size, None, None, Some(&skins), &[], &["Door_FFFFFF".to_string()], None);
++        let terrain = Terrain { size: [size, size], cells: vec![b'.'; (size * size) as usize] };
++        let lay = Lay { size, terrain: Some(&terrain), detail: Some(&detail), doors: Some(&doors) };
++        let cards = Cards { eye: None, cutouts: &HashMap::new(), people: PEOPLE_SCALE, items: &[], plants: &[], plant_art: None, lay: Some(lay) };
++        let (mut vertices, mut indices) = (Vec::new(), Vec::new());
++        add_doors(&mut vertices, &mut indices, &cards, size);
++        let one_door = vertices.len();
++        assert!(one_door > 0, "the door is drawn");
++        // Two leaves in all, meeting in the middle of both cells: as one cell's door has.
++        let single = Doors::new(vec![rimworld_bridge::DoorState { at: [3, 4], open: 0, axis: 0, rect: None }], 16);
++        let lay = Lay { doors: Some(&single), ..lay };
++        let cards = Cards { lay: Some(lay), ..cards };
++        let (mut vertices1, mut indices1) = (Vec::new(), Vec::new());
++        add_doors(&mut vertices1, &mut indices1, &cards, size);
++        assert_eq!(one_door, vertices1.len(), "the same two leaves");
++        let xs: Vec<f32> = vertices.iter().map(|v| v.position[0]).collect();
++        let (lo, hi) = xs.iter().fold((f32::MAX, f32::MIN), |(a, b), &x| (a.min(x), b.max(x)));
++        assert!((lo - (3 * CELL) as f32).abs() < 0.01 && (hi - (5 * CELL) as f32).abs() < 0.01, "across both cells: {lo} {hi}");
++    }
++
++    #[test]
++    fn the_dead_are_not_shot_at() {
++        let mut figures = HashMap::new();
++        figures.insert("a".to_string(), figure_of(&PawnState { art: Some([1, 1, 1]), draw: Some([2.0, 2.0]), ..pawn("a", 5.5, 5.5) }, 20));
++        figures.insert(
++            "b".to_string(),
++            figure_of(&PawnState { art: Some([1, 1, 1]), draw: Some([2.0, 2.0]), dead: true, downed: true, ..pawn("b", 8.5, 5.5) }, 20),
++        );
++        let cutouts: HashMap<u16, [f32; 4]> = [(1, [0.2, 0.2, 0.8, 0.75])].into();
++        let shot: Vec<String> = targets(&figures, None, &cutouts).into_iter().map(|(id, _, _)| id).collect();
++        assert_eq!(shot, vec!["a".to_string()]);
++    }
++
+     #[test]
+     fn animals_keep_rimworlds_size_against_people() {
+         // A person's portrait spans 2 cells and their body is 0.55 of it; a muffalo is drawn
+diff --git a/crates/sim/src/combat.rs b/crates/sim/src/combat.rs
+index 3a7c23f..e78bfca 100644
+--- a/crates/sim/src/combat.rs
++++ b/crates/sim/src/combat.rs
+@@ -139,6 +139,20 @@ pub struct TracePhaseOutput {
+     pub shot_verdicts: Vec<ShotCollisionVerdict>,
+ }
+ 
++/// For a player whose gun fires as a RimWorld colonist's (see `voxel::Magazine`), how much
++/// longer than MW2's its reload is; `None` for MW2's own. Kept for the viewmodel too, so the
++/// reload is drawn as long as it lasts.
++fn reload_scale(ps: &playerstate_iw4::PlayerState, facts: &weapon_iw4::WeaponCombatFacts, id: ClientId) -> Option<f32> {
++    let magazine = crate::voxel::magazine(id.0).filter(|m| m.reload_ms > 0);
++    let magazine = magazine?;
++    let clip_key = weapon_iw4::clip_table_key(facts.clip_index, ps.weapon);
++    let empty = clip_row_present(&ps.ammoclip, clip_key) && get_clip_for_hand(&ps.ammoclip, clip_key, 0) <= 0;
++    let mw2 = if empty && facts.reload_empty_time_ms > 0 { facts.reload_empty_time_ms } else { facts.reload_time_ms };
++    let scale = (mw2 > 0).then(|| magazine.reload_ms as f32 / mw2 as f32)?;
++    weapon_iw4::set_local_reload_scale(Some(scale));
++    Some(scale)
++}
++
+ pub(crate) fn advance_weapon_command(
+     world: &mut FrameWorld,
+     tick: Tick,
+@@ -432,8 +446,14 @@ pub(crate) fn advance_weapon_command(
+                     .map(|f| f.quick_raise_time_ms)
+                     .unwrap_or(0)
+             },
+-            perks0: ps.perks[0],
+-            perk_weap_reload_multiplier: weapon_iw4::PERK_WEAP_RELOAD_MULTIPLIER_DEFAULT,
++            // A RimWorld colonist's gun reloads in RimWorld's time (M16): MW2's own reload,
++            // run faster or slower as Sleight of Hand runs it.
++            perks0: match reload_scale(&ps, &facts, *id) {
++                Some(_) => ps.perks[0] | weapon_iw4::PERK_FASTRELOAD,
++                None => ps.perks[0],
++            },
++            perk_weap_reload_multiplier: reload_scale(&ps, &facts, *id)
++                .unwrap_or(weapon_iw4::PERK_WEAP_RELOAD_MULTIPLIER_DEFAULT),
+             offhand: {
+                 let mut inventory = [OffhandInvRow::default(); OFFHAND_INV_SLOTS];
+                 for (i, &slot) in ps.weapons.iter().enumerate() {
+diff --git a/crates/sim/src/voxel.rs b/crates/sim/src/voxel.rs
+index 2347665..5f3347f 100644
+--- a/crates/sim/src/voxel.rs
++++ b/crates/sim/src/voxel.rs
+@@ -187,6 +187,9 @@ pub struct Magazine {
+     pub client: u32,
+     pub rounds: i32,
+     pub hold: bool,
++    /// How long a reload takes, in milliseconds (M16: as long as RimWorld's cooldown and
++    /// aiming); 0 for MW2's own.
++    pub reload_ms: i32,
+ }
+ 
+ static MAGAZINE: RwLock<Option<Magazine>> = RwLock::new(None);
+@@ -195,6 +198,9 @@ pub fn set_magazine(magazine: Option<Magazine>) {
+     if let Ok(mut held) = MAGAZINE.write() {
+         *held = magazine;
+     }
++    if magazine.is_none_or(|m| m.reload_ms <= 0) {
++        weapon_iw4::set_local_reload_scale(None);
++    }
+ }
+ 
+ pub(crate) fn magazine(client: u32) -> Option<Magazine> {
+diff --git a/crates/weapon_iw4/src/lib.rs b/crates/weapon_iw4/src/lib.rs
+index ceb0e11..31c24e5 100644
+--- a/crates/weapon_iw4/src/lib.rs
++++ b/crates/weapon_iw4/src/lib.rs
+@@ -131,7 +131,7 @@ pub use tick::{
+     CHECK_FIRING_AMMO_DRY_FIRE_MS, CapturedCombatInput, MissingCombatFacts, PERK_FASTRELOAD,
+     PERK_WEAP_RELOAD_MULTIPLIER_DEFAULT, WeaponCmd, WeaponCombatFacts, WeaponHandState,
+     WeaponTickEvent, get_weapon_fire_button, perk_fastreload_eligible, spawn_clip_stock,
+-    spawn_weapon_hand, weapon_hands, weapon_ordinary, weapon_time_adjust,
++    spawn_weapon_hand, weapon_hands, weapon_ordinary, weapon_time_adjust, set_local_reload_scale, local_reload_scale,
+ };
+ pub use view_bob::{
+     BG_VIEW_KICK_MAX, BG_VIEW_KICK_MIN, BG_VIEW_KICK_SCALE, EFLAGS_TURRET_VEHICLE, LAND_DEFLECT_MS,
+diff --git a/crates/weapon_iw4/src/tick.rs b/crates/weapon_iw4/src/tick.rs
+index 2abb535..83954fb 100644
+--- a/crates/weapon_iw4/src/tick.rs
++++ b/crates/weapon_iw4/src/tick.rs
+@@ -734,6 +734,20 @@ pub fn get_weapon_fire_button(last_weapon_hand: i32, hand_index: i32) -> u32 {
+     }
+ }
+ 
++/// How much longer than MW2's the local player's reload lasts (RimWorld x MW2: as long as
++/// their colonist's), for the viewmodel to draw it so; `None` for MW2's own.
++static LOCAL_RELOAD_SCALE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
++
++pub fn set_local_reload_scale(scale: Option<f32>) {
++    let bits = scale.filter(|s| *s > 0.0).map_or(0, f32::to_bits);
++    LOCAL_RELOAD_SCALE.store(bits, core::sync::atomic::Ordering::Relaxed);
++}
++
++pub fn local_reload_scale() -> Option<f32> {
++    let bits = LOCAL_RELOAD_SCALE.load(core::sync::atomic::Ordering::Relaxed);
++    (bits != 0).then(|| f32::from_bits(bits))
++}
++
+ pub fn weapon_time_adjust(
+     hand: &WeaponHandState,
+     facts: &WeaponCombatFacts,

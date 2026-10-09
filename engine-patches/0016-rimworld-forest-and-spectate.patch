@@ -1,0 +1,975 @@
+diff --git a/crates/assets/src/minecraft_map.rs b/crates/assets/src/minecraft_map.rs
+index d5b2e15..3cbd697 100644
+--- a/crates/assets/src/minecraft_map.rs
++++ b/crates/assets/src/minecraft_map.rs
+@@ -8,9 +8,25 @@ const PROXY_ZONE: &str = "iw4:mp_rust";
+ /// The map whose level script the Minecraft world runs.
+ pub const PROXY_MAP: &str = "mp_rust";
+ 
+-/// RimWorld x MW2: a flat floor generated in code, played on the same
+-/// stand-in map. Needs no Minecraft files.
++/// RimWorld x MW2: a flat floor generated in code, played on a stand-in map of
++/// its own. Needs no Minecraft files.
+ pub const FLAT_ZONE: &str = "rimworld:flat";
++/// The map the RimWorld floor stands in for: its soldiers, trees and props are
++/// the ones the floor can show. Estate, for its forest; `RWMW2_STANDIN_MAP`
++/// names another (such as `mp_overgrown`, where installed).
++const FLAT_PROXY_MAP: &str = "mp_estate";
++
++/// The map the RimWorld floor stands in for, when the game has it, else Rust's.
++pub fn flat_proxy_map(games_root: &std::path::Path) -> String {
++    let root_dir = &GamesRoot(games_root.to_owned());
++    let wanted = std::env::var("RWMW2_STANDIN_MAP").ok().filter(|map| !map.trim().is_empty());
++    let wanted = wanted.as_deref().unwrap_or(FLAT_PROXY_MAP).trim().to_owned();
++    if asset_transport::find_zone_file(root_dir, &format!("iw4:{wanted}")).is_ok() {
++        return wanted;
++    }
++    diag::warn!(World, "RimWorld floor: stand-in map {wanted} is not installed; using {PROXY_MAP}");
++    PROXY_MAP.to_owned()
++}
+ 
+ pub fn is_flat(zone: &str) -> bool {
+     zone.eq_ignore_ascii_case(FLAT_ZONE)
+@@ -56,7 +72,8 @@ pub fn find_zone_file(root_dir: &GamesRoot, zone: &str) -> Result<ZoneFile, Stri
+         return asset_transport::find_zone_file(root_dir, zone);
+     }
+     if !is_minecraft_load(zone) {
+-        let mut proxy = asset_transport::find_zone_file(root_dir, PROXY_ZONE)?;
++        let zone = format!("iw4:{}", flat_proxy_map(&root_dir.0));
++        let mut proxy = asset_transport::find_zone_file(root_dir, &zone)?;
+         proxy.zone_name = FLAT_ZONE.to_owned();
+         proxy.alias_note = Some("RimWorld x MW2 flat floor".to_owned());
+         return Ok(proxy);
+diff --git a/crates/rimworld_bridge/src/lib.rs b/crates/rimworld_bridge/src/lib.rs
+index 7b9fb15..86aee89 100644
+--- a/crates/rimworld_bridge/src/lib.rs
++++ b/crates/rimworld_bridge/src/lib.rs
+@@ -15,7 +15,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
+ 
+ use bevy::prelude::*;
+ use rwmw2_protocol::{DEFAULT_ADDR, Message, PROTOCOL_VERSION, Side};
+-pub use rwmw2_protocol::{Message as BridgeMessage, PawnState, ShotResult, Stance, terrain};
++pub use rwmw2_protocol::{Message as BridgeMessage, PawnState, PlantState, ShotResult, Stance, terrain};
+ 
+ pub struct RimworldBridgePlugin;
+ 
+@@ -66,6 +66,10 @@ pub struct RimworldLink {
+     pub terrain: Option<Arc<Terrain>>,
+     /// Counts `terrain` messages, so game systems can tell a new one arrived.
+     pub terrain_revision: u64,
++    /// Every tree and bush on the map in view, from the latest `plants`.
++    pub plants: Option<Arc<Vec<PlantState>>>,
++    /// Counts `plants` messages, so game systems can tell a new one arrived.
++    pub plants_revision: u64,
+ }
+ 
+ /// What stands on every cell of RimWorld's map: `size` `[x, z]`, and one
+@@ -245,6 +249,13 @@ fn drain_inbox(inbox: Res<RimworldInbox>, mut link: ResMut<RimworldLink>) {
+                 link.terrain = Some(Arc::new(Terrain { size, cells: cells.into_bytes() }));
+                 link.terrain_revision += 1;
+             }
++            BridgeEvent::Received(Message::Plants { plants }) => {
++                if link.plants.is_none() {
++                    report(&format!("plants: {} trees and bushes", plants.len()));
++                }
++                link.plants = Some(Arc::new(plants));
++                link.plants_revision += 1;
++            }
+             // Messages for RimWorld, not for the engine.
+             BridgeEvent::Received(_) => {}
+         }
+diff --git a/crates/rimworld_world/Cargo.toml b/crates/rimworld_world/Cargo.toml
+index 6fae11b..f7b3612 100644
+--- a/crates/rimworld_world/Cargo.toml
++++ b/crates/rimworld_world/Cargo.toml
+@@ -9,6 +9,7 @@ description = "RimWorld x MW2: the rimworld:flat map, a flat floor of RimWorld-s
+ anim_iw4.workspace = true
+ asset_core.workspace = true
+ asset_material.workspace = true
++asset_model.workspace = true
+ asset_transport.workspace = true
+ asset_world.workspace = true
+ assets.workspace = true
+diff --git a/crates/rimworld_world/src/lib.rs b/crates/rimworld_world/src/lib.rs
+index 28431c9..d09c050 100644
+--- a/crates/rimworld_world/src/lib.rs
++++ b/crates/rimworld_world/src/lib.rs
+@@ -40,6 +40,16 @@
+ //! (one side's for colonists, the other's for raiders) standing, running or
+ //! lying prone with MW2's own animations. Animals and mechs stay figures, and
+ //! so does anyone when the map has no soldier model or animation to use.
++//! Figures and soldiers face the way they walk, diagonals too, and turn
++//! smoothly; standing, they turn to face as RimWorld says.
++//!
++//! RimWorld's trees and bushes are the stand-in map's MW2 trees and bushes
++//! (Estate's pines, birches, oaks and shrubs), sized by how grown they are,
++//! the nearest few hundred to the view; their blocks then keep only the
++//! trunk to bump into. Grassy ground wears MW2's grass.
++//!
++//! With no colonist drafted, the player spectates: empty handed, flying free
++//! over the map (WASD, Space up, C down, Shift faster), not moved by the sim.
+ use std::collections::HashMap;
+ use std::sync::Arc;
+ 
+@@ -79,7 +89,7 @@ const TILE_WHITE: u32 = 6;
+ /// RimWorld's ground, then what stands on it, in the order of [`TERRAIN_TILES`].
+ const TILE_TERRAIN: u32 = 7;
+ /// Each terrain code with its tile's colour, after [`TILE_TERRAIN`]; anything else is soil.
+-const TERRAIN_TILES: [(u8, [u8; 3]); 11] = [
++const TERRAIN_TILES: [(u8, [u8; 3]); 12] = [
+     (terrain::SOIL, [120, 98, 70]),
+     (terrain::SAND, [204, 184, 140]),
+     (terrain::STONE, [132, 130, 124]),
+@@ -91,12 +101,13 @@ const TERRAIN_TILES: [(u8, [u8; 3]); 11] = [
+     (terrain::COVER, [178, 158, 112]),
+     (terrain::TREE, [98, 72, 46]),
+     (terrain::DOOR, [132, 94, 58]),
++    (terrain::GRASS, [92, 118, 52]),
+ ];
+ /// The leaves over a tree's trunk, after the terrain tiles.
+ const TILE_LEAVES: u32 = TILE_TERRAIN + TERRAIN_TILES.len() as u32;
+ /// Minecraft's block texture for each terrain tile, as [`TERRAIN_TILES`], and its tint;
+ /// then the leaves'. Minecraft's water and leaves are grey and tinted by biome.
+-const MINECRAFT_TILES: [(&str, [u8; 3]); 12] = [
++const MINECRAFT_TILES: [(&str, [u8; 3]); 13] = [
+     ("dirt", [255, 255, 255]),
+     ("sand", [255, 255, 255]),
+     ("gravel", [255, 255, 255]),
+@@ -108,11 +119,12 @@ const MINECRAFT_TILES: [(&str, [u8; 3]); 12] = [
+     ("packed_mud", [255, 255, 255]),
+     ("oak_log", [255, 255, 255]),
+     ("oak_planks", [255, 255, 255]),
++    ("grass_block_top", [124, 189, 80]),
+     ("oak_leaves", [72, 181, 24]),
+ ];
+ /// MW2's own texture for a tile, from the game's `.iwd` files. These come first; water has
+ /// none that works as a block, so it keeps Minecraft's.
+-const MW2_TILES: [(u32, &str); 11] = [
++const MW2_TILES: [(u32, &str); 12] = [
+     (TILE_WALL, "ch_concretewall01_col"),
+     (TILE_TERRAIN, "ch_ground_dirt02_col"),
+     (TILE_TERRAIN + 1, "dirt_sand_01_col"),
+@@ -123,6 +135,7 @@ const MW2_TILES: [(u32, &str); 11] = [
+     (TILE_TERRAIN + 8, "ch_sandbags_coler"),
+     (TILE_TERRAIN + 9, "green_pine_bark_col"),
+     (TILE_TERRAIN + 10, "ch_wood01_col"),
++    (TILE_TERRAIN + 11, "grass_spotted01_col"),
+     (TILE_LEAVES, "green_pine_branch_no_snow_col"),
+ ];
+ /// A tree's trunk within its cell, for walking and shooting past.
+@@ -147,6 +160,11 @@ const START_TRIES: u32 = 5;
+ const FIGURE_FOLLOW: f32 = 12.0;
+ /// A pawn that moved further than this between snapshots jumps there.
+ const FIGURE_JUMP: f32 = 4.0;
++/// How quickly a figure's speed and facing catch up, per second.
++const VELOCITY_SMOOTHING: f32 = 8.0;
++const TURN_RATE: f32 = 9.0;
++/// Blocks a second above which a figure faces the way it walks.
++const FACE_WALK_FROM: f32 = 0.5;
+ /// Seconds between `player_move` messages, as RimWorld's snapshots.
+ const MOVE_SECONDS: f32 = 0.1;
+ /// Cells between the player and their colonist before the player is put back on it.
+@@ -164,6 +182,14 @@ const ARM_SECONDS: f32 = 0.5;
+ const OWN_SHOT_REACH: f64 = 2.0;
+ /// Above this share of a standing person's height, a bullet struck the head.
+ const HEAD_FROM: f64 = 0.8;
++/// Spectating: map units a second the camera flies, how much faster with Shift, how far
++/// the view tips up or down, and how high it may go, in blocks.
++const FLY_SPEED: f32 = 10.0 * BLOCK;
++const FLY_FAST: f32 = 3.0;
++const FLY_PITCH: f32 = 89.0;
++const FLY_CEILING: f32 = 80.0;
++/// The player's eye above their origin while spectating, as a standing player's.
++const FLY_EYE: f32 = 60.0;
+ 
+ pub struct RimworldWorldPlugin;
+ 
+@@ -179,6 +205,12 @@ impl Plugin for RimworldWorldPlugin {
+                     .after(frame::PresentedPublished)
+                     .in_set(frame::ClientSet::Present),
+                 place_soldiers.after(update).in_set(frame::ClientSet::Present),
++                place_plants.after(update).in_set(frame::ClientSet::Present),
++                spectate_camera
++                    .after(update)
++                    .after(render_anim::sync_camera_from_presented)
++                    .before(render_scene::GfxSceneAdd)
++                    .in_set(frame::ClientSet::Present),
+             ),
+         );
+     }
+@@ -220,6 +252,18 @@ pub struct FlatFloor {
+     /// RimWorld's terrain the blocks are built from, and the link's revision of it.
+     terrain: Option<Arc<Terrain>>,
+     terrain_revision: u64,
++    /// The view's eye, in block space, last frame.
++    eye: Option<[f64; 3]>,
++    /// Trees are MW2 models, so their blocks are not drawn; and whether the blocks up now
++    /// were built that way.
++    tree_models: bool,
++    built_tree_models: bool,
++    /// No colonist to play: the player flies free, with nothing in their hands. Where the
++    /// camera is (map space), the way it looks, and the pitch it was held back by.
++    spectating: bool,
++    fly_eye: [f32; 3],
++    fly_angles: [f32; 3],
++    fly_pitch_fix: f32,
+ }
+ 
+ /// A RimWorld bullet in flight across the floor, in block space.
+@@ -261,8 +305,12 @@ impl Tracer {
+ struct Figure {
+     x: f32,
+     z: f32,
+-    /// Degrees clockwise from north, as RimWorld's `rot`.
++    /// Degrees clockwise from north, as RimWorld's `rot`, turned smoothly towards where the
++    /// pawn walks, or towards its `rot` while it stands.
+     yaw: f32,
++    /// Blocks a second east and south, smoothed.
++    vx: f32,
++    vz: f32,
+     kind: Kind,
+     side: SideColour,
+     downed: bool,
+@@ -326,6 +374,7 @@ fn update(
+     mut floor: ResMut<FlatFloor>,
+     (mut link, outbox): (Option<ResMut<RimworldLink>>, Option<Res<RimworldOutbox>>),
+     (mut select, clock): (Option<ResMut<net::WeaponSelect>>, Option<Res<net::FrameClock>>),
++    (keys, look): (Option<Res<ButtonInput<KeyCode>>>, Option<Res<net::LookState>>),
+ ) {
+     // RimWorld's bullets since last frame; taken even while the floor is down, so none pile up.
+     let shots = link.as_deref_mut().map(|link| std::mem::take(&mut link.shots)).unwrap_or_default();
+@@ -352,6 +401,7 @@ fn update(
+         floor.terrain = link.as_deref().and_then(|link| link.terrain.clone());
+         floor.terrain_revision = link.as_deref().map_or(0, |link| link.terrain_revision);
+         build(&floor, authority, &mut view);
++        floor.built_tree_models = floor.tree_models;
+         floor.minimap = Some(images.add(minimap(floor.lay())));
+         diag::info!(World, "RimWorld flat floor: {0} by {0} cells", floor.size);
+         println!("[rimworld] flat floor ready: {0} by {0} cells", floor.size);
+@@ -365,6 +415,7 @@ fn update(
+         floor.origin = [f64::from(size) / 2.0, 0.0, f64::from(size) / 2.0];
+         floor.figures.clear();
+         build(&floor, authority, &mut view);
++        floor.built_tree_models = floor.tree_models;
+         floor.minimap = Some(images.add(minimap(floor.lay())));
+         println!("[rimworld] flat floor resized to RimWorld's map: {size} by {size} cells");
+     }
+@@ -384,6 +435,13 @@ fn update(
+             println!("[rimworld] the floor is now RimWorld's terrain");
+         }
+     }
++    // Trees became MW2 models (or stopped being): their blocks go (or come back).
++    if floor.active && floor.tree_models != floor.built_tree_models {
++        let size = floor.size;
++        let chunks = (-1 >> 4)..=(size >> 4);
++        build_chunks(&floor, &mut view, chunks.clone().flat_map(|cz| chunks.clone().map(move |cx| (cx, cz))));
++        floor.built_tree_models = floor.tree_models;
++    }
+     for _ in torn_down.read() {
+         stop(&mut floor, &mut view, ui.as_deref_mut());
+     }
+@@ -398,7 +456,8 @@ fn update(
+     }
+ 
+     if let Some(mut authority) = authority {
+-        place_players(&mut floor, &mut authority);
++        let skip = floor.spectating.then_some(local.0);
++        place_players(&mut floor, &mut authority, skip);
+         let local_alive = authority.0.player(local.0).is_some_and(|ps| ps.pm_type == 0);
+         floor.since_start_try += time.delta_secs();
+         if local_alive
+@@ -418,12 +477,25 @@ fn update(
+             }
+         }
+         let player = link.as_deref().and_then(RimworldLink::player).filter(|_| local_alive);
++        // No colonist to play: fly free over the map, empty handed.
++        if player.is_none() && local_alive {
++            let keys = keys.as_deref().map_or_else(FlyKeys::default, FlyKeys::from_input);
++            let look = look.as_deref().map_or([0; 3], |look| look.angles);
++            spectate(&mut floor, &mut authority, local.0, keys, look, time.delta_secs());
++        } else if floor.spectating {
++            stop_spectating(&mut floor, &mut authority, local.0);
++        }
+         play_colonist(&mut floor, &mut authority, local.0, player, outbox.as_deref(), time.delta_secs());
+-        // While playing a colonist, the player has only the colonist's gun: none of the
+-        // Minecraft map's extra guns.
+-        sim::voxel::set_own_guns_only(player.map(|_| local.0.0).into_iter().collect());
+-        if let Some(pawn) = player {
+-            let want = arm_player(&mut floor, &mut authority, local.0, pawn, time.delta_secs());
++        // While playing a colonist, the player has only the colonist's gun, and while
++        // spectating nothing: none of the Minecraft map's extra guns.
++        let own_guns = player.is_some() || floor.spectating;
++        sim::voxel::set_own_guns_only(own_guns.then_some(local.0.0).into_iter().collect());
++        let want = match player {
++            Some(pawn) => Some(arm_player(&mut floor, &mut authority, local.0, pawn, time.delta_secs())),
++            None if floor.spectating => Some(0),
++            None => None,
++        };
++        if let Some(want) = want {
+             // The client picks the gun its commands ask for, so it has to ask for this one;
+             // else it keeps asking for the gun it had and MW2 never shows the new one.
+             if let Some(select) = select.as_deref_mut()
+@@ -481,11 +553,14 @@ fn update(
+     let Some(ps) = presented.player(local.0) else {
+         return;
+     };
+-    let eye = sim::voxel::to_block(
+-        floor.origin,
+-        [ps.origin[0], ps.origin[1], ps.origin[2] + ps.view_height_current],
+-    );
+-    let (pitch, yaw) = (ps.viewangles[0].to_radians(), ps.viewangles[1].to_radians());
++    let (eye, angles) = if floor.spectating {
++        (floor.fly_eye, floor.fly_angles)
++    } else {
++        ([ps.origin[0], ps.origin[1], ps.origin[2] + ps.view_height_current], ps.viewangles)
++    };
++    let eye = sim::voxel::to_block(floor.origin, eye);
++    floor.eye = Some(eye);
++    let (pitch, yaw) = (angles[0].to_radians(), angles[1].to_radians());
+     let map_forward = [pitch.cos() * yaw.cos(), pitch.cos() * yaw.sin(), -pitch.sin()];
+     let forward = Vec3::new(map_forward[0], map_forward[2], -map_forward[1]);
+     let aspect = windows
+@@ -498,9 +573,12 @@ fn update(
+ 
+ /// Spawns land on the floor, spread around its middle, and anyone who falls
+ /// off is put back.
+-fn place_players(floor: &mut FlatFloor, authority: &mut net::AuthorityWorld) {
++fn place_players(floor: &mut FlatFloor, authority: &mut net::AuthorityWorld, skip: Option<sim::ClientId>) {
+     for index in 0..MAX_CLIENTS {
+         let id = sim::ClientId(index);
++        if Some(id) == skip {
++            continue;
++        }
+         let Some(ps) = authority.0.player(id) else {
+             floor.alive[index as usize] = false;
+             continue;
+@@ -684,6 +762,122 @@ fn shots_from(floor: &FlatFloor, eye: [f64; 3], weapon: &str, pawn: &str, events
+     shots
+ }
+ 
++/// The keys that fly the spectating camera this frame.
++#[derive(Clone, Copy, Debug, Default, PartialEq)]
++struct FlyKeys {
++    forward: f32,
++    right: f32,
++    up: f32,
++    fast: bool,
++}
++
++impl FlyKeys {
++    /// W A S D across, Space up, C or Ctrl down, Shift faster: as MW2's own move keys.
++    fn from_input(keys: &ButtonInput<KeyCode>) -> Self {
++        let axis = |plus: &[KeyCode], minus: &[KeyCode]| {
++            f32::from(u8::from(keys.any_pressed(plus.iter().copied()))) - f32::from(u8::from(keys.any_pressed(minus.iter().copied())))
++        };
++        Self {
++            forward: axis(&[KeyCode::KeyW, KeyCode::ArrowUp], &[KeyCode::KeyS, KeyCode::ArrowDown]),
++            right: axis(&[KeyCode::KeyD, KeyCode::ArrowRight], &[KeyCode::KeyA, KeyCode::ArrowLeft]),
++            up: axis(&[KeyCode::Space], &[KeyCode::KeyC, KeyCode::ControlLeft, KeyCode::ControlRight]),
++            fast: keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]),
++        }
++    }
++}
++
++/// With no colonist to play, the player flies free over the map with nothing in their
++/// hands: the sim stops moving them, and they go wherever the camera does.
++fn spectate(
++    floor: &mut FlatFloor,
++    authority: &mut net::AuthorityWorld,
++    local: sim::ClientId,
++    keys: FlyKeys,
++    look: [i32; 3],
++    dt: f32,
++) {
++    let Some(ps) = authority.0.player(local).copied() else {
++        return;
++    };
++    if !floor.spectating {
++        floor.spectating = true;
++        floor.fly_eye = [ps.origin[0], ps.origin[1], ps.origin[2] + ps.view_height_current.max(FLY_EYE)];
++        floor.fly_pitch_fix = 0.0;
++        floor.armed_with = None;
++        authority.0.set_external_motion(local, true);
++        if let Err(error) = authority.0.set_only_weapon(local, 0) {
++            diag::warn!(World, "RimWorld flat floor: could not empty the player's hands: {error}");
++        }
++        println!("[rimworld] no colonist drafted: spectating (WASD to fly, Space up, C down, Shift faster)");
++    }
++    floor.fly_angles = fly_angles(look, ps.delta_angles, &mut floor.fly_pitch_fix);
++    floor.fly_eye = fly(floor.fly_eye, floor.fly_angles, keys, dt, floor.size as f32 * BLOCK / 2.0);
++    let [x, y, z] = floor.fly_eye;
++    authority.0.set_origin(local, [x, y, z - FLY_EYE]);
++    authority.0.set_viewangles(local, floor.fly_angles);
++    // Anything handed over since (a respawn's loadout) goes again.
++    if ps.weapon != 0 {
++        let _ = authority.0.set_only_weapon(local, 0);
++    }
++}
++
++/// Back from spectating: the sim moves the player again, and [`play_colonist`] puts them on
++/// their colonist.
++fn stop_spectating(floor: &mut FlatFloor, authority: &mut net::AuthorityWorld, local: sim::ClientId) {
++    floor.spectating = false;
++    floor.playing = None;
++    authority.0.set_external_motion(local, false);
++}
++
++/// The spectating view's angles, as the sim turns a player's view: the mouse's look angles
++/// plus the player's `delta_angles`, its pitch held within [`FLY_PITCH`] by `fix`.
++fn fly_angles(look: [i32; 3], delta: [f32; 3], fix: &mut f32) -> [f32; 3] {
++    let wrap = |degrees: f32| (degrees + 180.0).rem_euclid(360.0) - 180.0;
++    let commanded = look.map(|short| short as f32 * 360.0 / 65536.0);
++    let mut pitch = wrap(commanded[0] + delta[0] + *fix);
++    if pitch.abs() > FLY_PITCH {
++        let held = FLY_PITCH.copysign(pitch);
++        *fix += held - pitch;
++        pitch = held;
++    }
++    [pitch, wrap(commanded[1] + delta[1]), 0.0]
++}
++
++/// The camera at `eye` (map space) flown for `dt` seconds by `keys`, looking along `angles`:
++/// forward goes where the view points, up and down straight up and down. It stays above
++/// the floor, below [`FLY_CEILING`], and within `reach` of the middle across.
++fn fly(eye: [f32; 3], angles: [f32; 3], keys: FlyKeys, dt: f32, reach: f32) -> [f32; 3] {
++    let (pitch, yaw) = (angles[0].to_radians(), angles[1].to_radians());
++    let forward = Vec3::new(pitch.cos() * yaw.cos(), pitch.cos() * yaw.sin(), -pitch.sin());
++    let right = Vec3::new(yaw.sin(), -yaw.cos(), 0.0);
++    let way = forward * keys.forward + right * keys.right + Vec3::Z * keys.up;
++    let speed = FLY_SPEED * if keys.fast { FLY_FAST } else { 1.0 };
++    let moved = Vec3::from_array(eye) + way.normalize_or_zero() * speed * dt;
++    let reach = reach + 8.0 * BLOCK;
++    [moved.x.clamp(-reach, reach), moved.y.clamp(-reach, reach), moved.z.clamp(0.5 * BLOCK, FLY_CEILING * BLOCK)]
++}
++
++/// While spectating, the view is the flying camera's, not the player's.
++fn spectate_camera(
++    floor: Res<FlatFloor>,
++    kick: Option<ResMut<render_anim::occupancy::view_kick::SessionViewKick>>,
++    mut cameras: Query<&mut Transform, (With<render_scene::FlyCamera>, Without<render_scene::WorldScriptModelInstance>)>,
++) {
++    if !floor.active || !floor.spectating {
++        return;
++    }
++    let pose = render_scene::WorldCameraPose { origin: floor.fly_eye, angles: floor.fly_angles };
++    if let Some(mut kick) = kick {
++        kick.refdef_vieworg = pose.origin;
++        kick.refdef_view_angles = pose.angles;
++    }
++    let eye = render_scene::transform_from_iw_view(pose);
++    for mut transform in &mut cameras {
++        transform.translation = eye.translation;
++        transform.rotation = eye.rotation;
++    }
++}
++
+ /// Client 0 at the middle, others on a ring four cells out.
+ fn spawn_point(index: u32) -> [f32; 3] {
+     if index == 0 {
+@@ -732,6 +926,10 @@ fn stop(floor: &mut FlatFloor, view: &mut MinecraftWorldView, ui: Option<&mut fr
+     floor.tracers.clear();
+     floor.targets.clear();
+     floor.armed_with = None;
++    floor.eye = None;
++    floor.tree_models = false;
++    floor.built_tree_models = false;
++    floor.spectating = false;
+     sim::voxel::set_mob_boxes(Vec::new());
+     sim::voxel::set_own_guns_only(Vec::new());
+     view.entity_meshes = Default::default();
+@@ -854,7 +1052,11 @@ fn build_chunks(floor: &FlatFloor, view: &mut MinecraftWorldView, chunks: impl I
+                         continue;
+                     }
+                     shapes[(((y - min_y) * 16 + z) * 16 + x) as usize] = shape(cell, y);
+-                    add_block(&mut mesh, lay, [bx, y, bz], cell);
++                    // A tree drawn as an MW2 model keeps only its trunk's collision.
++                    if floor.tree_models && cell == Cell::Column(terrain::TREE) {
++                        continue;
++                    }
++                    add_block(&mut mesh, lay, [bx, y, bz], cell, floor.tree_models);
+                 }
+             }
+         }
+@@ -908,20 +1110,22 @@ fn terrain_tile(code: u8) -> u32 {
+     TILE_TERRAIN + index as u32
+ }
+ 
+-/// The faces of one block that are not against another solid block.
+-fn add_block(mesh: &mut SectionMesh, lay: Lay, [x, y, z]: [i32; 3], cell: Cell) {
++/// The faces of one block that are not against another solid block. With `tree_models`,
++/// trees are not blocks, so they hide nothing.
++fn add_block(mesh: &mut SectionMesh, lay: Lay, [x, y, z]: [i32; 3], cell: Cell, tree_models: bool) {
+     let size = lay.size;
+     // A trunk hides nothing around it, and nothing hides a trunk's sides.
+     let thin = trunk(cell, y);
+     let solid = |dx: i32, dy: i32, dz: i32| {
+         let next = lay.cell(x + dx, y + dy, z + dz);
+-        next != Cell::Air && !trunk(next, y + dy) && (!thin || dy != 0)
++        let model = tree_models && next == Cell::Column(terrain::TREE);
++        next != Cell::Air && !model && !trunk(next, y + dy) && (!thin || dy != 0)
+     };
+     let tile = match cell {
+         Cell::Wall => TILE_WALL,
+         Cell::Column(terrain::TREE) if !thin => TILE_LEAVES,
+-        // The ground under a tree shows around its trunk.
+-        Cell::Ground(terrain::TREE) => terrain_tile(terrain::SOIL),
++        // The ground under a tree shows around its trunk: a forest floor.
++        Cell::Ground(terrain::TREE) => terrain_tile(terrain::GRASS),
+         Cell::Ground(code) | Cell::Column(code) => terrain_tile(code),
+         _ if x == size / 2 && z == size / 2 => TILE_CENTRE,
+         _ => {
+@@ -1200,6 +1404,8 @@ fn figure_of(pawn: &PawnState, size: i32) -> Figure {
+         x: pawn.x,
+         z: size as f32 - pawn.z,
+         yaw: pawn.rot,
++        vx: 0.0,
++        vz: 0.0,
+         kind: match pawn.kind.as_deref() {
+             Some("humanlike") => Kind::Humanlike,
+             Some("animal") => Kind::Animal,
+@@ -1215,16 +1421,25 @@ fn figure_of(pawn: &PawnState, size: i32) -> Figure {
+     }
+ }
+ 
+-/// Moves each figure towards its pawn, adds new pawns and drops gone ones.
++/// Moves each figure towards its pawn, adds new pawns and drops gone ones. A figure faces
++/// the way it walks, as RimWorld's pawns walk diagonally though they only face four ways,
++/// and turns smoothly.
+ fn follow_pawns(figures: &mut HashMap<String, Figure>, pawns: &[PawnState], size: i32, dt: f32) {
+     figures.retain(|id, _| pawns.iter().any(|pawn| &pawn.id == id));
+     let step = 1.0 - (-FIGURE_FOLLOW * dt).exp();
++    let smooth = 1.0 - (-VELOCITY_SMOOTHING * dt).exp();
++    let turn = 1.0 - (-TURN_RATE * dt).exp();
+     for pawn in pawns {
+         let target = figure_of(pawn, size);
+         match figures.get_mut(&pawn.id) {
+             Some(figure) if (figure.x - target.x).hypot(figure.z - target.z) < FIGURE_JUMP => {
+                 let (x, z) = (figure.x + (target.x - figure.x) * step, figure.z + (target.z - figure.z) * step);
+-                *figure = Figure { x, z, ..target };
++                let (vx, vz) = if dt > 0.0 { ((x - figure.x) / dt, (z - figure.z) / dt) } else { (0.0, 0.0) };
++                let (vx, vz) = (figure.vx + (vx - figure.vx) * smooth, figure.vz + (vz - figure.vz) * smooth);
++                let walking = !target.downed && vx.hypot(vz) > FACE_WALK_FROM;
++                let want = if walking { heading(vx, vz) } else { target.yaw };
++                let yaw = turn_towards(figure.yaw, want, turn);
++                *figure = Figure { x, z, yaw, vx, vz, ..target };
+             }
+             _ => {
+                 figures.insert(pawn.id.clone(), target);
+@@ -1233,6 +1448,17 @@ fn follow_pawns(figures: &mut HashMap<String, Figure>, pawns: &[PawnState], size
+     }
+ }
+ 
++/// The way something moving `vx` east and `vz` south heads, in degrees clockwise from north.
++fn heading(vx: f32, vz: f32) -> f32 {
++    vx.atan2(-vz).to_degrees().rem_euclid(360.0)
++}
++
++/// `from` turned `share` of the short way round to `to`, in degrees.
++fn turn_towards(from: f32, to: f32, share: f32) -> f32 {
++    let delta = (to - from + 540.0).rem_euclid(360.0) - 180.0;
++    (from + delta * share).rem_euclid(360.0)
++}
++
+ /// Where a bullet flying from `from` to `to` first meets a wall, rock or the floor's edge,
+ /// if it does. As in RimWorld, a wall next to the shooter's cell does not stop it: a pawn
+ /// leans out past a corner to shoot.
+@@ -1482,10 +1708,9 @@ enum Action {
+     Prone,
+ }
+ 
+-/// A pawn's MW2 soldier: the model entity, and where it stood last frame.
++/// A pawn's MW2 soldier: the model entity.
+ struct Soldier {
+     entity: Entity,
+-    last: [f32; 2],
+ }
+ 
+ /// The soldiers on the floor and what they play. Every soldier doing the same thing is at
+@@ -1603,11 +1828,7 @@ fn place_soldiers(
+         }
+         let head = head.filter(|head| has(head));
+         let transform = soldier_transform(origin, figure);
+-        let moved = soldiers
+-            .by_pawn
+-            .get(id)
+-            .map_or(0.0, |soldier| Vec2::from(soldier.last).distance(Vec2::new(figure.x, figure.z)));
+-        let speed = if dt > 0.0 { moved / dt } else { 0.0 };
++        let speed = figure.vx.hypot(figure.vz);
+         let action = match () {
+             _ if figure.downed => Action::Prone,
+             _ if speed > RUN_FROM => Action::Run,
+@@ -1654,12 +1875,9 @@ fn place_soldiers(
+                 if let Some(old) = existing {
+                     commands.entity(old).try_despawn();
+                 }
+-                soldiers.by_pawn.insert(id.clone(), Soldier { entity, last: [figure.x, figure.z] });
++                soldiers.by_pawn.insert(id.clone(), Soldier { entity });
+             }
+         }
+-        if let Some(soldier) = soldiers.by_pawn.get_mut(id) {
+-            soldier.last = [figure.x, figure.z];
+-        }
+         shown.insert(id.clone());
+     }
+     soldiers.by_pawn.retain(|id, soldier| {
+@@ -1672,6 +1890,223 @@ fn place_soldiers(
+     floor.soldiers = shown;
+ }
+ 
++/// MW2 models for each RimWorld plant kind, from the stand-in map (Estate's forest has
++/// pines, birches, oaks and bushes): any the map has, one picked per plant for variety,
++/// standing this many blocks high when fully grown. A kind with none the map has borrows
++/// the next kind's (palms and cacti have none in Estate).
++const PLANT_KINDS: [(&str, &[&str], f32); 7] = [
++    ("pine", &["foliage_red_pine_med", "foliage_red_pine_lg", "foliage_red_pine_sm", "foliage_tree_green_pine_lg_a"], 9.0),
++    ("birch", &["foliage_tree_birch_green_1", "foliage_tree_river_birch_xl_a"], 8.0),
++    ("oak", &["foliage_tree_grey_oak_xl_a", "foliage_tree_river_birch_xl_a"], 8.0),
++    ("dead", &["foliage_dead_pine_med", "foliage_dead_pine_lg", "foliage_tree_birch_bare_1", "foliage_tree_birch_bare_2"], 7.0),
++    ("palm", &[], 8.0),
++    ("cactus", &[], 1.6),
++    ("bush", &["foliage_bush_big_mp", "foliage_shrub_group01", "foliage_shrub_greenfan", "foliage_pacific_bushtree01"], 1.4),
++];
++/// The kind a kind with no models borrows from.
++fn plant_fallback(kind: &str) -> Option<&'static str> {
++    match kind {
++        "palm" | "birch" | "dead" => Some("oak"),
++        "oak" => Some("pine"),
++        "cactus" => Some("bush"),
++        _ => None,
++    }
++}
++/// The most plants drawn at once, nearest the view first, out to this many cells; and
++/// seconds between choosing them again.
++const PLANT_MODELS: usize = 500;
++const PLANT_REACH: f32 = 60.0;
++const PLANT_RESELECT_SECONDS: f32 = 0.5;
++/// The part of a full grown plant's height a seedling stands.
++const SEEDLING: f32 = 0.35;
++/// Model ids for plants, apart from the soldiers'.
++const PLANT_IDS_FROM: u32 = 0x2000_0000;
++
++/// A plant drawn as an MW2 model, by its cell.
++struct PlantModel {
++    entity: Entity,
++    model: String,
++    growth: f32,
++}
++
++/// The plants drawn now, and the models each kind may use.
++#[derive(Default)]
++struct Plants {
++    by_cell: HashMap<(i32, i32), PlantModel>,
++    next_id: u32,
++    /// Each kind's models the map has, with each one's height in map units; looked up once.
++    models: Option<HashMap<&'static str, Vec<(&'static str, f32)>>>,
++    revision: u64,
++    since_select: f32,
++    selected_at: Option<[f64; 3]>,
++}
++
++/// A fixed number from 0 to 1 for a cell, so each plant keeps its look.
++fn cell_hash(x: i32, z: i32, salt: u32) -> f32 {
++    let h = (x as u32).wrapping_mul(73_856_093) ^ (z as u32).wrapping_mul(19_349_663) ^ salt.wrapping_mul(83_492_791);
++    (h.wrapping_mul(2_654_435_761) >> 8) as f32 / (1u32 << 24) as f32
++}
++
++/// The model and its height for a plant of `kind` on cell `(x, z)`, among `models`.
++fn plant_model<'a>(models: &'a HashMap<&'static str, Vec<(&'static str, f32)>>, kind: &str, x: i32, z: i32) -> Option<(&'a str, f32, f32)> {
++    let mut kind = kind;
++    for _ in 0..4 {
++        let (_, _, blocks) = PLANT_KINDS.iter().find(|(name, _, _)| *name == kind)?;
++        match models.get(kind).filter(|list| !list.is_empty()) {
++            Some(list) => {
++                let (model, height) = list[(cell_hash(x, z, 1) * list.len() as f32) as usize % list.len()];
++                return Some((model, height, *blocks));
++            }
++            None => kind = plant_fallback(kind)?,
++        }
++    }
++    None
++}
++
++/// Where a plant stands: on its cell's middle, turned and sized for its growth.
++fn plant_transform(origin: [f64; 3], size: i32, plant: &rimworld_bridge::PlantState, height: f32, blocks: f32) -> Transform {
++    let at = sim::voxel::to_map(origin, [f64::from(plant.x) + 0.5, 0.0, f64::from(size - plant.z) - 0.5]);
++    let grown = SEEDLING + (1.0 - SEEDLING) * plant.growth.clamp(0.0, 1.0);
++    let jitter = 0.9 + 0.2 * cell_hash(plant.x, plant.z, 2);
++    let scale = blocks * BLOCK * grown * jitter / height.max(1.0);
++    Transform::from_translation(Vec3::from_array(at))
++        .with_rotation(Quat::from_rotation_z(cell_hash(plant.x, plant.z, 3) * std::f32::consts::TAU))
++        .with_scale(Vec3::splat(scale))
++}
++
++/// A model's height in its own units, from its vertices; `None` for one with none.
++fn model_height(skel: &asset_model::ModelSkel) -> Option<f32> {
++    let (low, high) = skel.positions.iter().fold((f32::MAX, f32::MIN), |(lo, hi), p| (lo.min(p[2]), hi.max(p[2])));
++    (high > low).then_some(high - low)
++}
++
++/// Puts an MW2 tree or bush on each of RimWorld's plants near the view, and takes it away
++/// when it goes. While the map has tree models, trees are not drawn as blocks.
++#[allow(clippy::too_many_arguments)]
++fn place_plants(
++    mut commands: Commands,
++    time: Res<Time>,
++    mut floor: ResMut<FlatFloor>,
++    link: Option<Res<RimworldLink>>,
++    catalog: Option<Res<asset_world::MapXModelSceneCatalog>>,
++    mut models: Query<(&mut render_scene::WorldScriptModelInstance, &mut Transform)>,
++    mut plants: Local<Plants>,
++) {
++    let plants = &mut *plants;
++    let (Some(catalog), true) = (catalog, floor.active) else {
++        for (_, plant) in plants.by_cell.drain() {
++            commands.entity(plant.entity).try_despawn();
++        }
++        plants.models = None;
++        plants.selected_at = None;
++        floor.tree_models = false;
++        return;
++    };
++    let kinds = plants.models.get_or_insert_with(|| {
++        let mut kinds = HashMap::new();
++        for (kind, names, _) in PLANT_KINDS {
++            let found: Vec<(&'static str, f32)> = names
++                .iter()
++                .filter_map(|name| match catalog.get_name(name) {
++                    Some(asset_world::MapXModelSceneAsset::Iw4(skel)) if skel.pose.is_some() => Some((*name, model_height(skel)?)),
++                    _ => None,
++                })
++                .collect();
++            kinds.insert(kind, found);
++        }
++        diag::info!(Zone, "rimworld: plant models {kinds:?}");
++        println!(
++            "[rimworld] MW2 plant models: {}",
++            kinds.values().map(Vec::len).sum::<usize>()
++        );
++        kinds
++    });
++    let has_trees = ["pine", "oak", "birch"].iter().any(|kind| kinds.get(kind).is_some_and(|list| !list.is_empty()));
++    floor.tree_models = has_trees;
++    if !has_trees {
++        return;
++    }
++    let all = link.as_deref().and_then(|link| link.plants.clone().map(|plants| (link.plants_revision, plants)));
++    let Some((revision, all)) = all else {
++        return;
++    };
++    // Choose again when RimWorld's plants change, the view moved, or now and then.
++    plants.since_select += time.delta_secs();
++    let eye = floor.eye.unwrap_or(floor.origin);
++    let moved = plants.selected_at.is_none_or(|at| (at[0] - eye[0]).hypot(at[2] - eye[2]) > 4.0);
++    if revision == plants.revision && !moved && plants.since_select < PLANT_RESELECT_SECONDS {
++        return;
++    }
++    plants.revision = revision;
++    plants.since_select = 0.0;
++    plants.selected_at = Some(eye);
++    let size = floor.size;
++    let distance = |p: &rimworld_bridge::PlantState| {
++        let (bx, bz) = (f64::from(p.x) + 0.5, f64::from(size - p.z) - 0.5);
++        ((bx - eye[0]).hypot(bz - eye[2])) as f32
++    };
++    let mut near: Vec<(f32, &rimworld_bridge::PlantState)> =
++        all.iter().map(|p| (distance(p), p)).filter(|(d, _)| *d <= PLANT_REACH).collect();
++    near.sort_by(|a, b| a.0.total_cmp(&b.0));
++    near.truncate(PLANT_MODELS);
++    let Some(kinds) = plants.models.clone() else { return };
++    let mut keep = std::collections::HashSet::new();
++    for (_, plant) in near {
++        let Some((model, height, blocks)) = plant_model(&kinds, &plant.kind, plant.x, plant.z) else { continue };
++        let cell = (plant.x, plant.z);
++        let transform = plant_transform(floor.origin, size, plant, height, blocks);
++        keep.insert(cell);
++        if let Some(drawn) = plants.by_cell.get_mut(&cell) {
++            if drawn.model == model && (drawn.growth - plant.growth).abs() < 0.01 {
++                continue;
++            }
++            if let Ok((mut instance, mut place)) = models.get_mut(drawn.entity) {
++                // A new composition revision, so the model is composed again.
++                plants.next_id = plants.next_id.wrapping_add(1);
++                *place = transform;
++                instance.transform = transform;
++                instance.current_model = asset_world::MapXModelAssetKey(model.to_owned());
++                instance.dobj_state = xmodel_runtime::DObjSemanticState::bind_pose(model.to_owned(), plants.next_id, 1);
++                drawn.model = model.to_owned();
++                drawn.growth = plant.growth;
++                continue;
++            }
++        }
++        let number = plants.next_id;
++        plants.next_id = plants.next_id.wrapping_add(1);
++        let ids = render_anim::occupancy::script_model::CLIENT_MODEL_IDS;
++        let model_id = ids.start + PLANT_IDS_FROM + number % (ids.len() as u32 - PLANT_IDS_FROM);
++        let [x, y, z] = transform.translation.to_array();
++        let entity = commands
++            .spawn((
++                render_anim::occupancy::script_model::ClientSceneModel { id: model_id },
++                transform,
++                Visibility::Inherited,
++                render_scene::WorldScriptModelInstance {
++                    id: asset_world::ScriptModelId::from_source_ordinal(model_id),
++                    authority_owner: None,
++                    current_model: asset_world::MapXModelAssetKey(model.to_owned()),
++                    transform,
++                    lighting_origin: [x, y, z + 40.0],
++                    dobj_state: xmodel_runtime::DObjSemanticState::bind_pose(model.to_owned(), 1, 1),
++                    metadata: asset_world::ScriptModelMetadata::default(),
++                    gentity_number: None,
++                },
++            ))
++            .id();
++        if let Some(old) = plants.by_cell.insert(cell, PlantModel { entity, model: model.to_owned(), growth: plant.growth }) {
++            commands.entity(old.entity).try_despawn();
++        }
++    }
++    plants.by_cell.retain(|cell, plant| {
++        let kept = keep.contains(cell);
++        if !kept {
++            commands.entity(plant.entity).try_despawn();
++        }
++        kept
++    });
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+@@ -1718,11 +2153,11 @@ mod tests {
+         let terrain = Terrain { size: [1, 1], cells: b"T".to_vec() };
+         let lay = Lay { size: 1, terrain: Some(&terrain) };
+         let mut mesh = SectionMesh::default();
+-        add_block(&mut mesh, lay, [0, 0, 0], tree);
++        add_block(&mut mesh, lay, [0, 0, 0], tree, false);
+         // Four sides, and a top under the next trunk block is hidden only by a full block.
+         assert!(mesh.vertices.iter().all(|v| (0.375..=0.625).contains(&v.position[0])));
+         let mut ground = SectionMesh::default();
+-        add_block(&mut ground, lay, [0, -1, 0], Cell::Ground(terrain::TREE));
++        add_block(&mut ground, lay, [0, -1, 0], Cell::Ground(terrain::TREE), false);
+         assert!(!ground.indices.is_empty(), "the ground shows around a trunk");
+     }
+ 
+@@ -1771,8 +2206,8 @@ mod tests {
+     fn textures_run_on_across_blocks() {
+         let mut mesh = SectionMesh::default();
+         let lay = Lay { size: 250, terrain: None };
+-        add_block(&mut mesh, lay, [5, -1, 9], Cell::Ground(terrain::SAND));
+-        add_block(&mut mesh, lay, [6, -1, 9], Cell::Ground(terrain::SAND));
++        add_block(&mut mesh, lay, [5, -1, 9], Cell::Ground(terrain::SAND), false);
++        add_block(&mut mesh, lay, [6, -1, 9], Cell::Ground(terrain::SAND), false);
+         let tile = terrain_tile(terrain::SAND);
+         let width = (TILE * TILE_COLUMNS) as f32;
+         let left = tile_x(tile) as f32 / width;
+@@ -1813,7 +2248,7 @@ mod tests {
+     #[test]
+     fn a_floor_cell_shows_only_its_top() {
+         let mut mesh = SectionMesh::default();
+-        add_block(&mut mesh, Lay { size: 250, terrain: None }, [10, -1, 10], Cell::Floor);
++        add_block(&mut mesh, Lay { size: 250, terrain: None }, [10, -1, 10], Cell::Floor, false);
+         assert_eq!(mesh.indices.len(), 6);
+         assert!(mesh.vertices[..4].iter().all(|v| v.position[1] == 0.0));
+     }
+@@ -2004,6 +2439,76 @@ mod tests {
+         assert_eq!(*target, None);
+     }
+ 
++    #[test]
++    fn a_figure_walking_diagonally_faces_its_way_and_turns_smoothly() {
++        let mut figures = HashMap::new();
++        let mut walker = pawn("a", 10.5, 239.5);
++        walker.rot = 0.0;
++        follow_pawns(&mut figures, &[walker.clone()], 250, 0.016);
++        let mut yaws = Vec::new();
++        // North east, a cell every 0.3 seconds, while RimWorld says it faces north then east.
++        for frame in 0..120 {
++            let t = frame as f32 * 0.016;
++            walker.x = 10.5 + t / 0.3;
++            walker.z = 239.5 + t / 0.3;
++            walker.rot = if frame % 20 < 10 { 0.0 } else { 90.0 };
++            follow_pawns(&mut figures, &[walker.clone()], 250, 0.016);
++            yaws.push(figures["a"].yaw);
++        }
++        let last = *yaws.last().unwrap();
++        assert!((last - 45.0).abs() < 5.0, "faces north east, not {last}");
++        for pair in yaws.windows(2) {
++            let step = (pair[1] - pair[0] + 540.0).rem_euclid(360.0) - 180.0;
++            assert!(step.abs() < 10.0, "no snapping: {step}");
++        }
++        // Standing still, it turns to RimWorld's facing.
++        walker.rot = 180.0;
++        for _ in 0..200 {
++            follow_pawns(&mut figures, &[walker.clone()], 250, 0.016);
++        }
++        assert!((figures["a"].yaw - 180.0).abs() < 2.0);
++    }
++
++    #[test]
++    fn headings_and_turns_go_the_short_way() {
++        assert_eq!(heading(1.0, 0.0), 90.0);
++        assert_eq!(heading(0.0, -1.0), 0.0);
++        assert_eq!(heading(0.0, 1.0), 180.0);
++        assert!((turn_towards(350.0, 10.0, 0.5) - 0.0).abs() < 1e-3);
++        assert!((turn_towards(10.0, 350.0, 0.5) - 0.0).abs() < 1e-3);
++    }
++
++    #[test]
++    fn the_spectating_camera_flies_where_it_looks_and_stays_over_the_map() {
++        let keys = FlyKeys { forward: 1.0, ..FlyKeys::default() };
++        let eye = fly([0.0, 0.0, 100.0], [0.0, 90.0, 0.0], keys, 1.0, 1000.0);
++        assert!(eye[0].abs() < 1e-3 && (eye[1] - FLY_SPEED).abs() < 1e-2);
++        let down = FlyKeys { up: -1.0, fast: true, ..FlyKeys::default() };
++        assert_eq!(fly([0.0, 0.0, 20.0], [0.0, 0.0, 0.0], down, 1.0, 1000.0)[2], 0.5 * BLOCK);
++        let mut fix = 0.0;
++        // Looking past straight down holds there, and pulling back up answers at once.
++        assert_eq!(fly_angles([(120.0 * 65536.0 / 360.0) as i32, 0, 0], [0.0; 3], &mut fix)[0], FLY_PITCH);
++        let back = fly_angles([(110.0 * 65536.0 / 360.0) as i32, 0, 0], [0.0; 3], &mut fix)[0];
++        assert!((back - (FLY_PITCH - 10.0)).abs() < 0.1, "{back}");
++    }
++
++    #[test]
++    fn plants_borrow_another_kinds_models_and_keep_their_pick() {
++        let mut models = HashMap::new();
++        models.insert("pine", vec![("pine_a", 400.0), ("pine_b", 500.0)]);
++        models.insert("oak", Vec::new());
++        models.insert("bush", vec![("bush_a", 60.0)]);
++        let (palm, _, blocks) = plant_model(&models, "palm", 3, 4).unwrap();
++        assert!(palm.starts_with("pine"));
++        assert_eq!(blocks, 9.0);
++        assert_eq!(plant_model(&models, "cactus", 1, 1).unwrap().0, "bush_a");
++        assert_eq!(plant_model(&models, "pine", 7, 9), plant_model(&models, "pine", 7, 9));
++        let plant = rimworld_bridge::PlantState { x: 12, z: 40, kind: "pine".into(), growth: 1.0 };
++        let place = plant_transform([125.0, 0.0, 125.0], 250, &plant, 400.0, 9.0);
++        let tall = 400.0 * place.scale.z / BLOCK;
++        assert!((8.0..10.0).contains(&tall), "{tall}");
++    }
++
+     #[test]
+     fn map_origin_is_the_middle_of_the_floor() {
+         let floor = FlatFloor { size: 250, origin: [125.0, 0.0, 125.0], ..Default::default() };
+diff --git a/crates/session/src/match_apply.rs b/crates/session/src/match_apply.rs
+index 7ffe4f2..5eff69b 100644
+--- a/crates/session/src/match_apply.rs
++++ b/crates/session/src/match_apply.rs
+@@ -985,11 +985,16 @@ fn preflight_match_install(
+             })
+             .collect(),
+     };
+-    // The Minecraft world runs the level script of the map it stands in for.
+-    let script_map = if assets::minecraft_map::is_block_world_load(zone) {
+-        assets::minecraft_map::PROXY_MAP
+-    } else {
+-        zone
++    // The Minecraft world runs the level script of the map it stands in for, and
++    // so does the RimWorld floor, on a map of its own.
++    let block_world = assets::minecraft_map::is_block_world_load(zone);
++    let flat_proxy = (block_world && !assets::minecraft_map::is_minecraft_load(zone))
++        .then(|| identity.map(|id| assets::minecraft_map::flat_proxy_map(&id.games_root)))
++        .flatten();
++    let script_map = match flat_proxy.as_deref() {
++        Some(map) => map,
++        None if block_world => assets::minecraft_map::PROXY_MAP,
++        None => zone,
+     };
+     let startup = sim::script::Iw4Startup::new(&sources, gametype, script_map);
+     let roots: Vec<&str> = startup.roots.iter().map(String::as_str).collect();

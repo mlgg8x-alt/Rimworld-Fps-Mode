@@ -1,0 +1,257 @@
+diff --git a/crates/frame/src/minecraft_ui.rs b/crates/frame/src/minecraft_ui.rs
+index 121884b..c3d2ba6 100644
+--- a/crates/frame/src/minecraft_ui.rs
++++ b/crates/frame/src/minecraft_ui.rs
+@@ -95,6 +95,9 @@ pub struct MinecraftUi {
+     /// The minimap's picture of the world and the map points of its
+     /// north-west and south-east corners.
+     pub minimap: Option<(Handle<Image>, [f32; 2], [f32; 2])>,
++    /// A block world other than Minecraft's shows `minimap` without the
++    /// rest of the Minecraft HUD (RimWorld x MW2's flat floor).
++    pub floor_minimap: bool,
+ }
+ 
+ /// The player's own MW2 body, drawn standing in the inventory's character
+diff --git a/crates/hud/src/compass.rs b/crates/hud/src/compass.rs
+index 916730e..14ccd40 100644
+--- a/crates/hud/src/compass.rs
++++ b/crates/hud/src/compass.rs
+@@ -151,7 +151,7 @@ pub(crate) fn update_compass(
+     // On a Minecraft map the minimap shows the Minecraft world.
+     let block_world = minecraft
+         .as_ref()
+-        .filter(|ui| ui.active)
++        .filter(|ui| ui.active || ui.floor_minimap)
+         .and_then(|ui| ui.minimap.clone())
+         .and_then(|(image, a, b)| {
+             let map_ns = hud_images.map_namespace();
+diff --git a/crates/render_frame/src/retained.rs b/crates/render_frame/src/retained.rs
+index 40be00b..74b1ce3 100644
+--- a/crates/render_frame/src/retained.rs
++++ b/crates/render_frame/src/retained.rs
+@@ -153,7 +153,6 @@ pub const XMODEL_OBJECT_ID_VIEWMODEL: u16 = 1;
+ 
+ pub const RENDER_FX_DEPTH_HACK: u32 = 2;
+ 
+-#[must_use]
+ /// A scene entity drawn in the view model's depth band, in front of the
+ /// world like the view model (the Minecraft inventory's character), or
+ /// `u32::MAX` for none.
+diff --git a/crates/rimworld_world/src/lib.rs b/crates/rimworld_world/src/lib.rs
+index 4e57511..4741e08 100644
+--- a/crates/rimworld_world/src/lib.rs
++++ b/crates/rimworld_world/src/lib.rs
+@@ -8,7 +8,9 @@
+ //! RimWorld cell `(x, z)` is block `(x, -1, z)`, its top face at block height 0.
+ use std::sync::Arc;
+ 
++use bevy::asset::RenderAssetUsages;
+ use bevy::prelude::*;
++use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+ use bevy::window::PrimaryWindow;
+ use image::{Rgba, RgbaImage};
+ use minecraft_terrain::mesh::{Atlas, SectionMesh, SectionVertex};
+@@ -32,6 +34,11 @@ const TILE_WALL: u32 = 5;
+ /// A cell grid line every this many cells, as RimWorld's own grid overlay.
+ const MAJOR_LINE: i32 = 10;
+ const FULL_BRIGHT: [u8; 2] = [15 * 16, 0];
++/// Minimap pixels a side.
++const MINIMAP_PIXELS: u32 = 512;
++/// Seconds between tries at skipping the match start countdown.
++const START_RETRY_SECONDS: f32 = 2.0;
++const START_TRIES: u32 = 5;
+ 
+ pub struct RimworldWorldPlugin;
+ 
+@@ -61,6 +68,11 @@ pub struct FlatFloor {
+     /// The block point at map origin.
+     pub origin: [f64; 3],
+     alive: [bool; MAX_CLIENTS as usize],
++    /// The floor's minimap picture.
++    minimap: Option<Handle<Image>>,
++    /// Tries so far at skipping the countdown, and seconds since the last.
++    start_tries: u32,
++    since_start_try: f32,
+ }
+ 
+ impl FlatFloor {
+@@ -80,6 +92,10 @@ fn size() -> i32 {
+ 
+ #[allow(clippy::too_many_arguments)]
+ fn update(
++    time: Res<Time>,
++    mut images: ResMut<Assets<Image>>,
++    mut ui: Option<ResMut<frame::MinecraftUi>>,
++    (mut inbox, mut request_ids): (Option<ResMut<net::ClientActionInbox>>, ResMut<net::ActionRequestIds>),
+     mut installed: MessageReader<frame::MatchInstalled>,
+     mut torn_down: MessageReader<frame::MatchTornDown>,
+     view: Option<ResMut<MinecraftWorldView>>,
+@@ -101,15 +117,18 @@ fn update(
+         floor.size = size();
+         floor.origin = [f64::from(floor.size) / 2.0, 0.0, f64::from(floor.size) / 2.0];
+         floor.alive = Default::default();
++        floor.start_tries = 0;
++        floor.since_start_try = START_RETRY_SECONDS;
+         build(&floor, authority, &mut view);
++        floor.minimap = Some(images.add(minimap(floor.size)));
+         diag::info!(World, "RimWorld flat floor: {0} by {0} cells", floor.size);
+         println!("[rimworld] flat floor ready: {0} by {0} cells", floor.size);
+     }
+     for _ in torn_down.read() {
+-        stop(&mut floor, &mut view);
++        stop(&mut floor, &mut view, ui.as_deref_mut());
+     }
+     for match_ in installed.read() {
+-        stop(&mut floor, &mut view);
++        stop(&mut floor, &mut view, ui.as_deref_mut());
+         if assets::minecraft_map::is_flat(&match_.zone) {
+             floor.pending = true;
+         }
+@@ -120,6 +139,34 @@ fn update(
+ 
+     if let Some(mut authority) = authority {
+         place_players(&mut floor, &mut authority);
++        let local_alive = authority.0.player(local.0).is_some_and(|ps| ps.pm_type == 0);
++        floor.since_start_try += time.delta_secs();
++        if local_alive
++            && authority.0.phase() == sim::MatchPhase::Warmup
++            && floor.start_tries < START_TRIES
++            && floor.since_start_try >= START_RETRY_SECONDS
++            && let Some(inbox) = inbox.as_deref_mut()
++        {
++            // As the `force_match_start` console command: no waiting for
++            // players and no countdown on the floor.
++            floor.start_tries += 1;
++            floor.since_start_try = 0.0;
++            let request_id = request_ids.allocate();
++            let action = sim::ClientAction::SetMatchPhase { request_id, phase: sim::MatchPhase::Playing };
++            if let Err(error) = inbox.push(local.0, action) {
++                diag::warn!(World, "RimWorld flat floor: could not skip the countdown: {error}");
++            }
++        }
++    }
++
++    // The minimap shows the floor, not the stand-in map.
++    if let (Some(ui), Some(image)) = (ui.as_deref_mut(), floor.minimap.clone()) {
++        let corner = |x: i32, z: i32| {
++            let p = sim::voxel::to_map(floor.origin, [f64::from(x), 0.0, f64::from(z)]);
++            [p[0], p[1]]
++        };
++        ui.minimap = Some((image, corner(-1, -1), corner(floor.size + 1, floor.size + 1)));
++        ui.floor_minimap = true;
+     }
+ 
+     let Some(ps) = presented.player(local.0) else {
+@@ -170,12 +217,17 @@ fn spawn_point(index: u32) -> [f32; 3] {
+     [angle.cos() * radius, angle.sin() * radius, 1.0]
+ }
+ 
+-fn stop(floor: &mut FlatFloor, view: &mut MinecraftWorldView) {
++fn stop(floor: &mut FlatFloor, view: &mut MinecraftWorldView, ui: Option<&mut frame::MinecraftUi>) {
+     floor.pending = false;
+     if !floor.active {
+         return;
+     }
+     floor.active = false;
++    floor.minimap = None;
++    if let Some(ui) = ui {
++        ui.minimap = None;
++        ui.floor_minimap = false;
++    }
+     sim::voxel::deactivate();
+     view.active = false;
+     view.atlas = None;
+@@ -349,6 +401,37 @@ fn atlas() -> Atlas {
+     Atlas::from_pixels(pixels, mipmaps)
+ }
+ 
++/// The floor seen from above, north (block -Z) up, wall included: the
++/// floor's colours, a grid line every 10 cells and the middle cell.
++fn minimap(size: i32) -> Image {
++    let across = size + 2;
++    let mut pixels = Vec::with_capacity((MINIMAP_PIXELS * MINIMAP_PIXELS * 4) as usize);
++    let block = |p: u32| (p as i64 * i64::from(across) / i64::from(MINIMAP_PIXELS)) as i32 - 1;
++    let line = |v: i32| (v - size / 2).rem_euclid(MAJOR_LINE) == 0;
++    for py in 0..MINIMAP_PIXELS {
++        for px in 0..MINIMAP_PIXELS {
++            let (x, z) = (block(px), block(py));
++            // The first pixel row or column of a cell carries its line.
++            let first_x = px == 0 || block(px - 1) != x;
++            let first_z = py == 0 || block(py - 1) != z;
++            let rgb = match cell_at(size, x, -1, z) {
++                Cell::Wall => [104, 110, 120],
++                _ if x == size / 2 && z == size / 2 => [224, 122, 40],
++                _ if (first_x && line(x)) || (first_z && line(z)) => [118, 110, 96],
++                _ => [182, 172, 150],
++            };
++            pixels.extend_from_slice(&[rgb[0], rgb[1], rgb[2], 255]);
++        }
++    }
++    Image::new(
++        Extent3d { width: MINIMAP_PIXELS, height: MINIMAP_PIXELS, depth_or_array_layers: 1 },
++        TextureDimension::D2,
++        pixels,
++        TextureFormat::Rgba8UnormSrgb,
++        RenderAssetUsages::default(),
++    )
++}
++
+ /// The sun in the first of the nine sun and moon slots; no moon.
+ fn celestial() -> RgbaImage {
+     RgbaImage::from_fn(32 * 9, 32, |x, y| {
+@@ -419,6 +502,16 @@ mod tests {
+         assert_eq!((last.width(), last.height()), (TILES, 1));
+     }
+ 
++    #[test]
++    fn minimap_shows_the_middle_cell_in_its_middle() {
++        let image = minimap(250);
++        let middle = MINIMAP_PIXELS / 2 + 1;
++        let at = ((middle * MINIMAP_PIXELS + middle) * 4) as usize;
++        let data = image.data.as_ref().unwrap();
++        assert_eq!(&data[at..at + 3], &[224, 122, 40]);
++        assert_eq!(&data[0..3], &[104, 110, 120], "the wall at the north-west corner");
++    }
++
+     #[test]
+     fn map_origin_is_the_middle_of_the_floor() {
+         let floor = FlatFloor { size: 250, origin: [125.0, 0.0, 125.0], ..Default::default() };
+diff --git a/skate/crates/skate-core/src/animation/commands/buffers.rs b/skate/crates/skate-core/src/animation/commands/buffers.rs
+index c86ab0d..df6c705 100644
+--- a/skate/crates/skate-core/src/animation/commands/buffers.rs
++++ b/skate/crates/skate-core/src/animation/commands/buffers.rs
+@@ -3,6 +3,8 @@ use crate::animation::output::{NativeMatrix, Sqt};
+ use std::marker::PhantomData;
+ use std::sync::atomic::{AtomicUsize, Ordering};
+ 
++// `fetch_update` is `try_update` on newer Rust; allowed so older toolchains still build.
++#[allow(deprecated)]
+ pub(crate) fn new_owner() -> usize {
+     static NEXT_OWNER: AtomicUsize = AtomicUsize::new(0);
+     NEXT_OWNER
+diff --git a/skate/crates/skate-host/src/physics/footplant/settings.rs b/skate/crates/skate-host/src/physics/footplant/settings.rs
+index c1b4913..d68c1db 100644
+--- a/skate/crates/skate-host/src/physics/footplant/settings.rs
++++ b/skate/crates/skate-host/src/physics/footplant/settings.rs
+@@ -1,7 +1,7 @@
+ //! Cached physics_footplantmanager layout used by82D6FD60/82D6F5F0/82D70070.
+ use skate_data::collections::Collections;
+ use skate_core::point_graph::PointGraph;
+-pub(super) struct Settings {
++pub(in crate::physics) struct Settings {
+     pub deck_bounds: [f32; 4],      //0
+     pub max_leg_angle_error: f32,   //280 degrees
+     pub leg_length_on_landing: f32, //288
+diff --git a/skate/crates/skate-host/src/physics/respawn.rs b/skate/crates/skate-host/src/physics/respawn.rs
+index e2a8d06..a8e5cfc 100644
+--- a/skate/crates/skate-host/src/physics/respawn.rs
++++ b/skate/crates/skate-host/src/physics/respawn.rs
+@@ -13,7 +13,7 @@ use skate_core::{
+ use skate_data::collections::Collections;
+ use super::offboard::contact_queries::Probe;
+ 
+-pub(super) struct Runtime {
++pub(crate) struct Runtime {
+     history: History,
+     settings: Settings,
+     measurements: i32,

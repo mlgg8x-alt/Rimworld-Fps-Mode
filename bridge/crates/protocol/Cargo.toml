@@ -1,0 +1,10 @@
+[package]
+name = "rwmw2-protocol"
+version = "0.0.1"
+edition.workspace = true
+license.workspace = true
+description = "Wire messages between the RimWorld mod and the IW4L side (protocol v0: newline-delimited JSON)."
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

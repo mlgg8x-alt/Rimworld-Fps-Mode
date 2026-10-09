@@ -1,0 +1,425 @@
+diff --git a/crates/rimworld_bridge/src/lib.rs b/crates/rimworld_bridge/src/lib.rs
+index 86aee89..a0a3736 100644
+--- a/crates/rimworld_bridge/src/lib.rs
++++ b/crates/rimworld_bridge/src/lib.rs
+@@ -70,6 +70,31 @@ pub struct RimworldLink {
+     pub plants: Option<Arc<Vec<PlantState>>>,
+     /// Counts `plants` messages, so game systems can tell a new one arrived.
+     pub plants_revision: u64,
++    /// Shells (mortar rounds, grenades, rockets) and explosions RimWorld sent since a game
++    /// system last took them (M4+).
++    pub shells: Vec<Shell>,
++    pub explosions: Vec<Explosion>,
++}
++
++/// Something other than a bullet RimWorld fired: from where to where (`[x, height, z]` in
++/// cells, `z` north), how long it flies, and whether it arcs over everything.
++#[derive(Debug, Clone, PartialEq)]
++pub struct Shell {
++    pub weapon: String,
++    pub from: [f32; 3],
++    pub to: [f32; 3],
++    pub seconds: f32,
++    pub arc: bool,
++}
++
++/// An explosion: its middle (`x`, `z` north, in cells), radius in cells, and RimWorld's
++/// damage type.
++#[derive(Debug, Clone, PartialEq)]
++pub struct Explosion {
++    pub x: f32,
++    pub z: f32,
++    pub radius: f32,
++    pub damage: String,
+ }
+ 
+ /// What stands on every cell of RimWorld's map: `size` `[x, z]`, and one
+@@ -249,6 +274,16 @@ fn drain_inbox(inbox: Res<RimworldInbox>, mut link: ResMut<RimworldLink>) {
+                 link.terrain = Some(Arc::new(Terrain { size, cells: cells.into_bytes() }));
+                 link.terrain_revision += 1;
+             }
++            BridgeEvent::Received(Message::Shell { weapon, from, to, seconds, arc, .. }) => {
++                if link.shells.len() < MAX_SHOTS {
++                    link.shells.push(Shell { weapon, from, to, seconds, arc });
++                }
++            }
++            BridgeEvent::Received(Message::Explosion { x, z, radius, damage }) => {
++                if link.explosions.len() < MAX_SHOTS {
++                    link.explosions.push(Explosion { x, z, radius, damage });
++                }
++            }
+             BridgeEvent::Received(Message::Plants { plants }) => {
+                 if link.plants.is_none() {
+                     report(&format!("plants: {} trees and bushes", plants.len()));
+diff --git a/crates/rimworld_world/Cargo.toml b/crates/rimworld_world/Cargo.toml
+index f7b3612..244b22e 100644
+--- a/crates/rimworld_world/Cargo.toml
++++ b/crates/rimworld_world/Cargo.toml
+@@ -13,8 +13,10 @@ asset_model.workspace = true
+ asset_transport.workspace = true
+ asset_world.workspace = true
+ assets.workspace = true
++audio.workspace = true
+ bevy.workspace = true
+ diag.workspace = true
++entity_iw4.workspace = true
+ frame.workspace = true
+ net.workspace = true
+ render_anim.workspace = true
+diff --git a/crates/rimworld_world/src/lib.rs b/crates/rimworld_world/src/lib.rs
+index d09c050..be82a08 100644
+--- a/crates/rimworld_world/src/lib.rs
++++ b/crates/rimworld_world/src/lib.rs
+@@ -174,6 +174,11 @@ const TRACER_LENGTH: f32 = 2.5;
+ const TRACER_HALF_WIDTH: f32 = 0.035;
+ const TRACER_SPEED: f32 = 60.0;
+ const MAX_TRACERS: usize = 256;
++/// A shell's streak: its half thickness in blocks, and the seconds of flight it spans.
++const SHELL_HALF_WIDTH: f32 = 0.09;
++const SHELL_STREAK_SECONDS: f32 = 0.06;
++/// Seconds before a mortar shell lands that its incoming whistle starts.
++const WHISTLE_SECONDS: f32 = 1.5;
+ /// Blocks between the points a missed bullet's path is checked at for walls.
+ const TRACER_STEP: f32 = 0.05;
+ /// Seconds between tries at handing the player their colonist's gun.
+@@ -206,6 +211,7 @@ impl Plugin for RimworldWorldPlugin {
+                     .in_set(frame::ClientSet::Present),
+                 place_soldiers.after(update).in_set(frame::ClientSet::Present),
+                 place_plants.after(update).in_set(frame::ClientSet::Present),
++                present_booms.after(update).in_set(frame::ClientSet::Present),
+                 spectate_camera
+                     .after(update)
+                     .after(render_anim::sync_camera_from_presented)
+@@ -240,6 +246,10 @@ pub struct FlatFloor {
+     since_move: f32,
+     /// Bullets in flight, drawn as tracers.
+     tracers: Vec<Tracer>,
++    /// Mortar shells, grenades and rockets in flight.
++    shells: Vec<ShellFlight>,
++    /// Explosions and incoming whistles for MW2 to show and sound this frame.
++    booms: Vec<Boom>,
+     /// Seconds since the player was last handed their colonist's gun, and the RimWorld gun
+     /// last reported.
+     since_arm: f32,
+@@ -300,6 +310,66 @@ impl Tracer {
+     }
+ }
+ 
++/// A mortar shell, grenade or rocket RimWorld fired, in flight across the floor, in block
++/// space: from where to where, how long it takes, how high it goes, and how long it has flown.
++#[derive(Clone, Debug, PartialEq)]
++struct ShellFlight {
++    from: Vec3,
++    to: Vec3,
++    seconds: f32,
++    apex: f32,
++    flown: f32,
++    arc: bool,
++    /// Its incoming whistle has started.
++    whistled: bool,
++}
++
++impl ShellFlight {
++    fn new(shell: &rimworld_bridge::Shell, size: i32) -> Self {
++        let block = |[x, y, z]: [f32; 3]| Vec3::new(x, y, size as f32 - z);
++        let (from, to) = (block(shell.from), block(shell.to));
++        let reach = from.distance(to);
++        // A mortar climbs high and drops; a thrown grenade or a rocket keeps low.
++        let apex = if shell.arc { (reach * 0.4).clamp(8.0, 60.0) } else { (reach * 0.12).clamp(0.3, 4.0) };
++        Self { from, to, seconds: shell.seconds.clamp(0.1, 30.0), apex, flown: 0.0, arc: shell.arc, whistled: false }
++    }
++
++    /// Where it is `t` seconds after leaving.
++    fn at(&self, t: f32) -> Vec3 {
++        let f = (t / self.seconds).clamp(0.0, 1.0);
++        self.from.lerp(self.to, f) + Vec3::Y * self.apex * 4.0 * f * (1.0 - f)
++    }
++
++    /// The streak it draws now, tail then head; `None` once it has landed.
++    fn streak(&self) -> Option<(Vec3, Vec3)> {
++        (self.flown < self.seconds).then(|| (self.at(self.flown - SHELL_STREAK_SECONDS), self.at(self.flown)))
++    }
++}
++
++/// Something for MW2 to show or sound, at a map point.
++#[derive(Clone, Debug, PartialEq)]
++enum Boom {
++    /// A shell about to land.
++    Whistle([f32; 3]),
++    /// An explosion: its radius in map units and RimWorld's damage type.
++    Explosion { at: [f32; 3], radius: f32, damage: String },
++}
++
++/// Flies each shell on for `dt` seconds and drops those that landed. Returns where the
++/// mortar shells now [`WHISTLE_SECONDS`] from landing will land.
++fn fly_shells(shells: &mut Vec<ShellFlight>, dt: f32) -> Vec<Vec3> {
++    let mut whistles = Vec::new();
++    for shell in shells.iter_mut() {
++        shell.flown += dt;
++        if shell.arc && !shell.whistled && shell.seconds - shell.flown <= WHISTLE_SECONDS {
++            shell.whistled = true;
++            whistles.push(shell.to);
++        }
++    }
++    shells.retain(|shell| shell.flown < shell.seconds);
++    whistles
++}
++
+ /// Where a pawn's figure stands, in block space, and how it looks.
+ #[derive(Clone, Debug, PartialEq)]
+ struct Figure {
+@@ -378,6 +448,8 @@ fn update(
+ ) {
+     // RimWorld's bullets since last frame; taken even while the floor is down, so none pile up.
+     let shots = link.as_deref_mut().map(|link| std::mem::take(&mut link.shots)).unwrap_or_default();
++    let shells = link.as_deref_mut().map(|link| std::mem::take(&mut link.shells)).unwrap_or_default();
++    let blasts = link.as_deref_mut().map(|link| std::mem::take(&mut link.explosions)).unwrap_or_default();
+     // RimWorld's map size, while it is connected.
+     let wanted = link
+         .as_deref()
+@@ -534,6 +606,18 @@ fn update(
+     let fired: Vec<Tracer> = shots.iter().take(room).map(|shot| Tracer::new(shot, floor.lay())).collect();
+     floor.tracers.extend(fired);
+     fly_tracers(&mut floor.tracers, time.delta_secs());
++    // RimWorld's shells, flying in; mortars whistle as they come down.
++    let room = MAX_TRACERS.saturating_sub(floor.shells.len());
++    floor.shells.extend(shells.iter().take(room).map(|shell| ShellFlight::new(shell, size)));
++    let whistles = fly_shells(&mut floor.shells, time.delta_secs());
++    let origin = floor.origin;
++    let to_map = |b: Vec3| sim::voxel::to_map(origin, [f64::from(b.x), f64::from(b.y), f64::from(b.z)]);
++    floor.booms.extend(whistles.into_iter().map(|at| Boom::Whistle(to_map(at))));
++    // RimWorld's explosions, for MW2 to show and sound.
++    for blast in blasts.iter().take(MAX_TRACERS) {
++        let at = to_map(Vec3::new(blast.x, 0.0, size as f32 - blast.z));
++        floor.booms.push(Boom::Explosion { at, radius: blast.radius * BLOCK, damage: blast.damage.clone() });
++    }
+     // Every figure but the player's own is a target.
+     floor.targets = targets(&floor.figures, floor.playing.as_deref());
+     sim::voxel::set_mob_boxes(
+@@ -548,6 +632,7 @@ fn update(
+             .filter(|(id, _)| Some(id.as_str()) != playing && !floor.soldiers.contains(id.as_str()))
+             .map(|(_, figure)| figure),
+         &floor.tracers,
++        &floor.shells,
+     );
+ 
+     let Some(ps) = presented.player(local.0) else {
+@@ -924,6 +1009,8 @@ fn stop(floor: &mut FlatFloor, view: &mut MinecraftWorldView, ui: Option<&mut fr
+     floor.figures.clear();
+     floor.playing = None;
+     floor.tracers.clear();
++    floor.shells.clear();
++    floor.booms.clear();
+     floor.targets.clear();
+     floor.armed_with = None;
+     floor.eye = None;
+@@ -1489,11 +1576,14 @@ fn fly_tracers(tracers: &mut Vec<Tracer>, dt: f32) {
+ }
+ 
+ /// Every figure's and tracer's boxes, as MinecraftOSS entity vertices and indices.
+-fn figure_mesh<'a>(figures: impl Iterator<Item = &'a Figure>, tracers: &[Tracer]) -> (Vec<u8>, Vec<u32>) {
++fn figure_mesh<'a>(figures: impl Iterator<Item = &'a Figure>, tracers: &[Tracer], shells: &[ShellFlight]) -> (Vec<u8>, Vec<u32>) {
+     let (mut vertices, mut indices) = (Vec::new(), Vec::new());
+     for (tail, head) in tracers.iter().filter_map(Tracer::streak) {
+         add_segment(&mut vertices, &mut indices, tail, head, TRACER_HALF_WIDTH, [1.0, 0.86, 0.45]);
+     }
++    for (tail, head) in shells.iter().filter_map(ShellFlight::streak) {
++        add_segment(&mut vertices, &mut indices, tail, head, SHELL_HALF_WIDTH, [0.22, 0.22, 0.2]);
++    }
+     for figure in figures {
+         let body = match (figure.side, figure.kind) {
+             (SideColour::Player, _) => [0.22, 0.45, 0.95],
+@@ -2107,6 +2197,123 @@ fn place_plants(
+     });
+ }
+ 
++/// MW2's weapons whose explosions stand in for RimWorld's, by RimWorld damage type and size:
++/// the first the game has. Big blasts (a mortar shell's) are an airstrike's, smaller ones a
++/// frag grenade's; smoke is a smoke grenade's, EMP a stun grenade's.
++const BIG_BLAST: &[&str] = &["artillery_mp", "stealth_bomb_mp", "ac130_105mm_mp", "frag_grenade_mp"];
++const SMALL_BLAST: &[&str] = &["frag_grenade_mp", "c4_mp", "semtex_mp"];
++const SMOKE_BLAST: &[&str] = &["smoke_grenade_mp", "frag_grenade_mp"];
++const EMP_BLAST: &[&str] = &["concussion_grenade_mp", "flash_grenade_mp", "frag_grenade_mp"];
++/// Cells of radius from which a blast is big.
++const BIG_BLAST_FROM: f32 = 2.5;
++/// MW2 sound aliases for a shell coming in, the first the game has; else the first alias
++/// whose name has "incoming" in it.
++const WHISTLES: &[&str] = &["mortar_incoming", "artillery_incoming", "fast_artillery_round", "mp_artillery_incoming"];
++/// Surface type for blasts, as `weapon_iw4::SURFACE_TYPE_NAMES`: dirt.
++const BLAST_SURFACE: u8 = 6;
++
++/// What the game has to show and sound RimWorld's explosions with, looked up once a match.
++#[derive(Clone, Debug, Default, PartialEq)]
++struct BoomKit {
++    big: Option<u32>,
++    small: Option<u32>,
++    smoke: Option<u32>,
++    emp: Option<u32>,
++    whistle: Option<String>,
++}
++
++/// The first of `names` the game has, as a weapon index.
++fn first_weapon(weapons: &assets::PreparedWeapons, names: &[&str]) -> Option<u32> {
++    names.iter().find_map(|name| weapons.0.resolve_index(name).ok().flatten())
++}
++
++/// The whistle among `aliases`: the first of [`WHISTLES`], else any with "incoming".
++fn pick_whistle<'a>(aliases: &[&'a str]) -> Option<&'a str> {
++    WHISTLES
++        .iter()
++        .find_map(|want| aliases.iter().copied().find(|alias| alias.eq_ignore_ascii_case(want)))
++        .or_else(|| aliases.iter().copied().find(|alias| alias.to_ascii_lowercase().contains("incoming")))
++}
++
++/// The weapon whose explosion shows a RimWorld blast.
++fn blast_weapon(kit: &BoomKit, radius_cells: f32, damage: &str) -> Option<u32> {
++    match damage {
++        "Smoke" => kit.smoke,
++        "EMP" => kit.emp,
++        _ if radius_cells >= BIG_BLAST_FROM => kit.big,
++        _ => kit.small,
++    }
++    .or(kit.small)
++}
++
++/// Shows and sounds RimWorld's explosions as MW2's own (the blast's effect and sound, as a
++/// grenade's or an airstrike's going off; no damage, RimWorld does that), and plays an
++/// incoming whistle where a mortar shell is about to land.
++fn present_booms(
++    mut commands: Commands,
++    mut floor: ResMut<FlatFloor>,
++    weapons: Option<Res<assets::PreparedWeapons>>,
++    bank: Option<Res<audio::SoundBank>>,
++    mut sounds: MessageWriter<audio::AliasCommand>,
++    mut kit: Local<Option<BoomKit>>,
++) {
++    let booms = std::mem::take(&mut floor.booms);
++    let (Some(weapons), true) = (weapons, floor.active) else {
++        *kit = None;
++        return;
++    };
++    let kit = kit.get_or_insert_with(|| {
++        let aliases: Vec<&str> = bank.as_deref().map_or_else(Vec::new, |bank| (0..).map_while(|i| bank.0.name_at(i)).collect());
++        let found = BoomKit {
++            big: first_weapon(&weapons, BIG_BLAST),
++            small: first_weapon(&weapons, SMALL_BLAST),
++            smoke: first_weapon(&weapons, SMOKE_BLAST),
++            emp: first_weapon(&weapons, EMP_BLAST),
++            whistle: pick_whistle(&aliases).map(str::to_owned),
++        };
++        let shell_sounds: Vec<&&str> = aliases
++            .iter()
++            .filter(|alias| ["incoming", "whistle", "artillery", "mortar"].iter().any(|word| alias.to_ascii_lowercase().contains(word)))
++            .collect();
++        diag::info!(World, "rimworld: explosions {found:?}; shell sounds in the bank: {shell_sounds:?}");
++        found
++    });
++    for boom in booms {
++        match boom {
++            Boom::Whistle(at) => {
++                if let Some(alias) = &kit.whistle {
++                    sounds.write(audio::AliasCommand::Play(audio::PlayAlias {
++                        namespace: asset_core::AssetNamespace::Iw4,
++                        alias: alias.clone(),
++                        fallback: None,
++                        origin_inches: Some(at),
++                        snd_ent: None,
++                    }));
++                }
++            }
++            Boom::Explosion { at, radius, damage } => {
++                let Some(weapon) = blast_weapon(kit, radius / BLOCK, &damage) else { continue };
++                commands.trigger(net::EntityExplosion {
++                    entity: Entity::PLACEHOLDER,
++                    event: net::DispatchedEntityEvent {
++                        sequence: sim::EventSequence::default(),
++                        tick: sim::Tick::default(),
++                        event: entity_iw4::EntityEventKind::GRENADE_EXPLODE,
++                        payload: sim::EntityEventPayload {
++                            weapon,
++                            origin: at,
++                            direction: [0.0, 0.0, 1.0],
++                            surf_type: BLAST_SURFACE,
++                            number: -1,
++                            ..Default::default()
++                        },
++                    },
++                });
++            }
++        }
++    }
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+@@ -2302,7 +2509,7 @@ mod tests {
+     #[test]
+     fn a_standing_person_is_three_boxes_facing_east() {
+         let figure = figure_of(&pawn("a", 10.5, 10.5), 250);
+-        let (bytes, indices) = figure_mesh(std::iter::once(&figure), &[]);
++        let (bytes, indices) = figure_mesh(std::iter::once(&figure), &[], &[]);
+         let vertices: &[Vertex] = bytemuck::cast_slice(&bytes);
+         assert_eq!(indices.len(), 3 * 6 * 6);
+         // The visor (the last box) is east of the body: rot 90 faces east.
+@@ -2384,7 +2591,7 @@ mod tests {
+         let (tail, head) = tracers[0].streak().unwrap();
+         // The bullet drops a little on the way, so x is a hair short of the distance flown.
+         assert!((head.x - 20.0).abs() < 1e-2 && (tail.x - 17.5).abs() < 1e-2, "{tail} {head}");
+-        let (bytes, indices) = figure_mesh(std::iter::empty(), &tracers);
++        let (bytes, indices) = figure_mesh(std::iter::empty(), &tracers, &[]);
+         let vertices: &[Vertex] = bytemuck::cast_slice(&bytes);
+         assert_eq!(indices.len(), 6 * 6);
+         let xs = vertices.iter().map(|v| v.position[0]);
+@@ -2509,6 +2716,51 @@ mod tests {
+         assert!((8.0..10.0).contains(&tall), "{tall}");
+     }
+ 
++    #[test]
++    fn a_blast_with_no_entity_still_reaches_global_observers() {
++        #[derive(Resource, Default)]
++        struct Heard(u32);
++        let mut app = App::new();
++        app.init_resource::<Heard>().add_observer(|_: On<net::EntityExplosion>, mut heard: ResMut<Heard>| heard.0 += 1);
++        app.world_mut().commands().trigger(net::EntityExplosion {
++            entity: Entity::PLACEHOLDER,
++            event: net::DispatchedEntityEvent {
++                sequence: sim::EventSequence::default(),
++                tick: sim::Tick::default(),
++                event: entity_iw4::EntityEventKind::GRENADE_EXPLODE,
++                payload: sim::EntityEventPayload::default(),
++            },
++        });
++        app.world_mut().flush();
++        assert_eq!(app.world().resource::<Heard>().0, 1);
++    }
++
++    #[test]
++    fn blasts_and_whistles_pick_mw2_stand_ins() {
++        let kit = BoomKit { big: Some(1), small: Some(2), smoke: Some(3), emp: None, whistle: None };
++        assert_eq!(blast_weapon(&kit, 3.9, "Bomb"), Some(1));
++        assert_eq!(blast_weapon(&kit, 1.0, "Bomb"), Some(2));
++        assert_eq!(blast_weapon(&kit, 3.0, "Smoke"), Some(3));
++        assert_eq!(blast_weapon(&kit, 3.0, "EMP"), Some(2));
++        assert_eq!(pick_whistle(&["weap_ak47", "Artillery_Incoming", "mortar_incoming"]), Some("mortar_incoming"));
++        assert_eq!(pick_whistle(&["weap_ak47", "heli_incoming_far"]), Some("heli_incoming_far"));
++        assert_eq!(pick_whistle(&["weap_ak47"]), None);
++    }
++
++    #[test]
++    fn a_mortar_shell_climbs_drops_and_whistles_before_landing() {
++        let shell = rimworld_bridge::Shell { weapon: "Bullet_Shell_HighExplosive".into(), from: [10.0, 1.0, 10.0], to: [50.0, 0.0, 10.0], seconds: 4.0, arc: true };
++        let mut shells = vec![ShellFlight::new(&shell, 250)];
++        let top = shells[0].at(2.0);
++        assert!(top.y > 15.0 && (top.x - 30.0).abs() < 0.01, "{top}");
++        assert!(fly_shells(&mut shells, 2.0).is_empty());
++        let whistles = fly_shells(&mut shells, 0.6);
++        assert_eq!(whistles, vec![Vec3::new(50.0, 0.0, 240.0)]);
++        assert!(fly_shells(&mut shells, 0.5).is_empty());
++        fly_shells(&mut shells, 1.0);
++        assert!(shells.is_empty());
++    }
++
+     #[test]
+     fn map_origin_is_the_middle_of_the_floor() {
+         let floor = FlatFloor { size: 250, origin: [125.0, 0.0, 125.0], ..Default::default() };

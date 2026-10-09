@@ -1,0 +1,222 @@
+diff --git a/crates/rimworld_world/src/lib.rs b/crates/rimworld_world/src/lib.rs
+index 8d0dc80..e0252fc 100644
+--- a/crates/rimworld_world/src/lib.rs
++++ b/crates/rimworld_world/src/lib.rs
+@@ -30,6 +30,11 @@
+ //! stands on it is a column of blocks: rock and walls taller than a person,
+ //! trees, cover a block high to crouch behind, doors a gap under a lintel.
+ //! Cells that change in RimWorld (a wall built, rock mined) change here too.
++//! Trees are a thin trunk to walk past, under a block of leaves overhead, as
++//! RimWorld lets pawns walk through them. When the engine has fetched
++//! Minecraft's files for its Minecraft map, the blocks wear Minecraft's
++//! textures (dirt, sand, stone, planks, logs, leaves); otherwise plain ones
++//! made here.
+ use std::collections::HashMap;
+ use std::sync::Arc;
+ 
+@@ -75,6 +80,28 @@ const TERRAIN_TILES: [(u8, [u8; 3]); 11] = [
+     (terrain::TREE, [98, 72, 46]),
+     (terrain::DOOR, [132, 94, 58]),
+ ];
++/// The leaves over a tree's trunk, after the terrain tiles.
++const TILE_LEAVES: u32 = TILE_TERRAIN + TERRAIN_TILES.len() as u32;
++/// Minecraft's block texture for each terrain tile, as [`TERRAIN_TILES`], and its tint;
++/// then the leaves'. Minecraft's water and leaves are grey and tinted by biome.
++const MINECRAFT_TILES: [(&str, [u8; 3]); 12] = [
++    ("dirt", [255, 255, 255]),
++    ("sand", [255, 255, 255]),
++    ("gravel", [255, 255, 255]),
++    ("oak_planks", [255, 255, 255]),
++    ("water_still", [96, 150, 236]),
++    ("water_still", [44, 82, 170]),
++    ("stone", [255, 255, 255]),
++    ("stone_bricks", [255, 255, 255]),
++    ("packed_mud", [255, 255, 255]),
++    ("oak_log", [255, 255, 255]),
++    ("oak_planks", [255, 255, 255]),
++    ("oak_leaves", [72, 181, 24]),
++];
++/// A tree's trunk within its cell, for walking and shooting past.
++const TRUNK: [f32; 6] = [0.375, 0.0, 0.375, 0.625, 1.0, 0.625];
++/// Blocks of trunk under a tree's leaves.
++const TRUNK_HEIGHT: i32 = 2;
+ /// Blocks of natural rock above the floor, and of walls and trees: both higher than a
+ /// standing player (about two blocks), rock a little higher still.
+ const ROCK_HEIGHT: i32 = 4;
+@@ -757,7 +784,7 @@ fn cell_at(size: i32, x: i32, y: i32, z: i32) -> Cell {
+ fn build(floor: &FlatFloor, authority: &net::AuthorityWorld, view: &mut MinecraftWorldView) {
+     let size = floor.size;
+     let full = vec![[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]];
+-    sim::voxel::activate(authority.0.content().clip_brushes(), floor.origin, vec![Vec::new(), full]);
++    sim::voxel::activate(authority.0.content().clip_brushes(), floor.origin, vec![Vec::new(), full, vec![TRUNK]]);
+     view.active = true;
+     view.origin = floor.origin;
+     view.generation += 1;
+@@ -789,7 +816,7 @@ fn build_chunks(floor: &FlatFloor, view: &mut MinecraftWorldView, chunks: impl I
+                     if cell == Cell::Air {
+                         continue;
+                     }
+-                    shapes[(((y - min_y) * 16 + z) * 16 + x) as usize] = 1;
++                    shapes[(((y - min_y) * 16 + z) * 16 + x) as usize] = shape(cell, y);
+                     add_block(&mut mesh, lay, [bx, y, bz], cell);
+                 }
+             }
+@@ -823,6 +850,21 @@ fn changed_chunks(old: Lay, new: Lay) -> Vec<(i32, i32)> {
+     chunks.into_iter().collect()
+ }
+ 
++/// What a block of a tree is: trunk below, leaves above.
++fn trunk(cell: Cell, y: i32) -> bool {
++    cell == Cell::Column(terrain::TREE) && y < TRUNK_HEIGHT
++}
++
++/// A block's `sim::voxel` shape: a full block, a tree's thin trunk, or nothing to
++/// collide with for its leaves.
++fn shape(cell: Cell, y: i32) -> u16 {
++    match cell {
++        Cell::Column(terrain::TREE) if trunk(cell, y) => 2,
++        Cell::Column(terrain::TREE) => 0,
++        _ => 1,
++    }
++}
++
+ /// A terrain code's tile.
+ fn terrain_tile(code: u8) -> u32 {
+     let index = TERRAIN_TILES.iter().position(|(c, _)| *c == code).unwrap_or(0);
+@@ -832,9 +874,17 @@ fn terrain_tile(code: u8) -> u32 {
+ /// The faces of one block that are not against another solid block.
+ fn add_block(mesh: &mut SectionMesh, lay: Lay, [x, y, z]: [i32; 3], cell: Cell) {
+     let size = lay.size;
+-    let solid = |dx: i32, dy: i32, dz: i32| lay.cell(x + dx, y + dy, z + dz) != Cell::Air;
++    // A trunk hides nothing around it, and nothing hides a trunk's sides.
++    let thin = trunk(cell, y);
++    let solid = |dx: i32, dy: i32, dz: i32| {
++        let next = lay.cell(x + dx, y + dy, z + dz);
++        next != Cell::Air && !trunk(next, y + dy) && (!thin || dy != 0)
++    };
+     let tile = match cell {
+         Cell::Wall => TILE_WALL,
++        Cell::Column(terrain::TREE) if !thin => TILE_LEAVES,
++        // The ground under a tree shows around its trunk.
++        Cell::Ground(terrain::TREE) => terrain_tile(terrain::SOIL),
+         Cell::Ground(code) | Cell::Column(code) => terrain_tile(code),
+         _ if x == size / 2 && z == size / 2 => TILE_CENTRE,
+         _ => {
+@@ -842,8 +892,9 @@ fn add_block(mesh: &mut SectionMesh, lay: Lay, [x, y, z]: [i32; 3], cell: Cell)
+             TILE_CELL + u32::from(major(x)) + 2 * u32::from(major(z))
+         }
+     };
+-    let (x0, y0, z0) = (x as f32, y as f32, z as f32);
+-    let (x1, y1, z1) = (x0 + 1.0, y0 + 1.0, z0 + 1.0);
++    let [bx0, by0, bz0, bx1, by1, bz1] = if thin { TRUNK } else { [0.0, 0.0, 0.0, 1.0, 1.0, 1.0] };
++    let (x0, y0, z0) = (x as f32 + bx0, y as f32 + by0, z as f32 + bz0);
++    let (x1, y1, z1) = (x as f32 + bx1, y as f32 + by1, z as f32 + bz1);
+     // Corners counterclockwise seen from outside; Minecraft's face shades.
+     let faces: [([i32; 3], [[f32; 3]; 4], f32); 6] = [
+         ([0, 1, 0], [[x0, y1, z0], [x0, y1, z1], [x1, y1, z1], [x1, y1, z0]], 1.0),
+@@ -883,6 +934,13 @@ fn add_block(mesh: &mut SectionMesh, lay: Lay, [x, y, z]: [i32; 3], cell: Cell)
+ 
+ /// The floor's tiles, and their mip levels down to a pixel a tile.
+ fn atlas() -> Atlas {
++    let textures = assets::minecraft_map::root()
++        .map(|root| root.join("resourcepacks/local/minecraft-26.3/assets/minecraft/textures/block"));
++    atlas_from(textures.as_deref())
++}
++
++/// [`atlas`], with Minecraft's block textures from `textures` where they are there.
++fn atlas_from(textures: Option<&std::path::Path>) -> Atlas {
+     let mut pixels = RgbaImage::new(TILE * TILES, TILE);
+     let base = [182, 172, 150];
+     let fine = [158, 149, 130];
+@@ -914,6 +972,26 @@ fn atlas() -> Atlas {
+     for (index, &(code, colour)) in TERRAIN_TILES.iter().enumerate() {
+         tile(&mut pixels, TILE_TERRAIN + index as u32, &|x, y| terrain_pixel(code, colour, x, y));
+     }
++    tile(&mut pixels, TILE_LEAVES, &|x, y| {
++        let dark = ((x * 7 + y * 11) % 5 == 0) as u8 * 30;
++        [56 - dark / 2, 110 - dark, 34 - dark / 3]
++    });
++    // Minecraft's own textures over those, where the engine has fetched them.
++    let codes = TERRAIN_TILES.iter().map(|(code, _)| Some(*code)).chain([None]);
++    for (index, (code, &(name, tint))) in codes.zip(MINECRAFT_TILES.iter()).enumerate() {
++        let Some(texture) = textures.and_then(|dir| block_texture(dir, name, tint)) else {
++            continue;
++        };
++        // Ground keeps a faint line on its west and north edges: RimWorld's cells.
++        let ground = code.is_some_and(|code| column(code).is_empty());
++        let deep = code == Some(terrain::DEEP_WATER);
++        tile(&mut pixels, TILE_TERRAIN + index as u32, &|x, y| {
++            let p = texture.get_pixel(x, y);
++            let edge = if ground && (x == 0 || y == 0) { 0.85 } else { 1.0 };
++            let shade = if deep { 0.8 } else { 1.0 };
++            [0, 1, 2].map(|i| (f32::from(p[i]) * edge * shade) as u8)
++        });
++    }
+     let mut mipmaps: Vec<RgbaImage> = Vec::new();
+     while mipmaps.last().unwrap_or(&pixels).height() > 1 {
+         let from = mipmaps.last().unwrap_or(&pixels);
+@@ -933,6 +1011,27 @@ fn atlas() -> Atlas {
+     Atlas::from_pixels(pixels, mipmaps)
+ }
+ 
++/// One of Minecraft's 16-pixel block textures, its first frame for an animated one, tinted
++/// and made opaque (see-through pixels, as in leaves, go dark).
++fn block_texture(dir: &std::path::Path, name: &str, tint: [u8; 3]) -> Option<RgbaImage> {
++    let image = image::open(dir.join(format!("{name}.png"))).ok()?.to_rgba8();
++    let side = image.width();
++    if side == 0 || image.height() < side {
++        return None;
++    }
++    let frame = image::imageops::crop_imm(&image, 0, 0, side, side).to_image();
++    let frame = if side == TILE { frame } else { image::imageops::resize(&frame, TILE, TILE, image::imageops::FilterType::Nearest) };
++    Some(RgbaImage::from_fn(TILE, TILE, |x, y| {
++        let p = frame.get_pixel(x, y);
++        let alpha = u32::from(p[3]);
++        let channel = |i: usize| {
++            let over = (u32::from(p[i]) * alpha + 40 * (255 - alpha)) / 255;
++            (over * u32::from(tint[i]) / 255) as u8
++        };
++        Rgba([channel(0), channel(1), channel(2), 255])
++    }))
++}
++
+ /// One pixel of a terrain code's tile: its colour, a little uneven, with a
+ /// pattern for what it is. Ground tiles keep a faint line on their west and
+ /// north edges, so RimWorld's cells still show.
+@@ -1235,6 +1334,36 @@ mod tests {
+         assert!(!open(b'O') && !open(b'W') && open(b'~') && open(b'.'));
+     }
+ 
++    #[test]
++    fn trees_are_a_trunk_under_leaves() {
++        let tree = Cell::Column(terrain::TREE);
++        assert_eq!((shape(tree, 0), shape(tree, 1), shape(tree, 2)), (2, 2, 0), "walk past the trunk, under the leaves");
++        assert_eq!(shape(Cell::Column(terrain::WALL), 0), 1);
++        let terrain = Terrain { size: [1, 1], cells: b"T".to_vec() };
++        let lay = Lay { size: 1, terrain: Some(&terrain) };
++        let mut mesh = SectionMesh::default();
++        add_block(&mut mesh, lay, [0, 0, 0], tree);
++        // Four sides, and a top under the next trunk block is hidden only by a full block.
++        assert!(mesh.vertices.iter().all(|v| (0.375..=0.625).contains(&v.position[0])));
++        let mut ground = SectionMesh::default();
++        add_block(&mut ground, lay, [0, -1, 0], Cell::Ground(terrain::TREE));
++        assert!(!ground.indices.is_empty(), "the ground shows around a trunk");
++    }
++
++    #[test]
++    fn minecraft_textures_are_used_when_there() {
++        let dir = std::env::temp_dir().join(format!("rwmw2-textures-{}", std::process::id()));
++        std::fs::create_dir_all(&dir).unwrap();
++        // An animated water strip: two 16 pixel frames, grey.
++        RgbaImage::from_pixel(16, 32, Rgba([200, 200, 200, 255])).save(dir.join("water_still.png")).unwrap();
++        let atlas = atlas_from(Some(&dir));
++        let water = atlas.pixels.get_pixel((TILE_TERRAIN + 4) * TILE + 5, 5);
++        assert_eq!([water[0], water[1], water[2]], [75, 117, 185], "tinted blue");
++        let soil = atlas.pixels.get_pixel(TILE_TERRAIN * TILE + 5, 5);
++        assert_eq!(*soil, atlas_from(None).pixels.get_pixel(TILE_TERRAIN * TILE + 5, 5).to_owned(), "no dirt.png: the plain tile");
++        std::fs::remove_dir_all(dir).ok();
++    }
++
+     #[test]
+     fn only_chunks_near_changed_cells_rebuild() {
+         let before = Terrain { size: [64, 64], cells: vec![b'.'; 64 * 64] };

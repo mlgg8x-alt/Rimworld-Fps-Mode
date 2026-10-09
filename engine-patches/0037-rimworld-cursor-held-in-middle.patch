@@ -1,0 +1,43 @@
+diff --git a/crates/console/src/plugin/mod.rs b/crates/console/src/plugin/mod.rs
+index 7053141..e70a2c8 100644
+--- a/crates/console/src/plugin/mod.rs
++++ b/crates/console/src/plugin/mod.rs
+@@ -129,6 +129,7 @@ impl Plugin for ConsolePlugin {
+                     expire_pressed_inputs,
+                     publish_client_action_input,
+                     sync_cursor_grab,
++                    hold_cursor_in_middle,
+                 )
+                     .chain()
+                     .after(InputSystems)
+@@ -636,6 +637,30 @@ fn sync_cursor_grab(
+     }
+ }
+ 
++/// RimWorld x MW2 (M19): on Windows a "locked" cursor is only kept inside the window, so
++/// it wanders while the player turns, and could reach RimWorld's minimap window over MW2's
++/// corner or the screen's edge, where a click went to another program. While play holds
++/// the cursor it is put back in the middle of the window every frame; turning reads the
++/// mouse's own movement, not the cursor's.
++fn hold_cursor_in_middle(
++    minecraft: Option<Res<frame::MinecraftUi>>,
++    mut windows: Query<(&mut Window, &CursorOptions), With<PrimaryWindow>>,
++) {
++    if !cfg!(windows) || !minecraft.is_some_and(|ui| ui.floor_minimap) {
++        return;
++    }
++    let Ok((mut window, cursor)) = windows.single_mut() else {
++        return;
++    };
++    if cursor.grab_mode == CursorGrabMode::None || !window.focused {
++        return;
++    }
++    let middle = Vec2::new(window.width() / 2.0, window.height() / 2.0);
++    if window.cursor_position().is_none_or(|at| at.distance(middle) > 1.0) {
++        window.set_cursor_position(Some(middle));
++    }
++}
++
+ fn setup_console(
+     mut commands: Commands,
+     mut fonts: ResMut<Assets<Font>>,

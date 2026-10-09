@@ -1,0 +1,1281 @@
+diff --git a/crates/hud/src/menus/mod.rs b/crates/hud/src/menus/mod.rs
+index ca24be6..46cf96f 100644
+--- a/crates/hud/src/menus/mod.rs
++++ b/crates/hud/src/menus/mod.rs
+@@ -356,7 +356,7 @@ pub(crate) fn update_script_menus(
+     }
+ 
+     let scoreboard = snapshot
+-        .filter(|s| in_game && crate::scoreboard::displayed(world.scores_open, s, local.0))
++        .filter(|s| in_game && !world.rimworld_floor && crate::scoreboard::displayed(world.scores_open, s, local.0))
+         .and_then(|_| catalog.get(SCOREBOARD_MENU));
+     if (menus.stack.is_empty() && scoreboard.is_none()) || !surface.is_ready() {
+         return;
+@@ -659,6 +659,9 @@ fn handle_input(
+         match runner.menus.top_captured() {
+             Some(top) => runner.escape(&top),
+             None if !runner.world.in_game => runner.open("iw4l_main"),
++            None if runner.world.rimworld_floor && runner.catalog.get(rimworld::PAUSE_MENU).is_some() => {
++                runner.open(rimworld::PAUSE_MENU);
++            }
+             None => {
+                 let main = runner
+                     .world
+@@ -675,9 +678,6 @@ fn handle_input(
+                     FALLBACK_MAIN_MENU.to_owned()
+                 });
+                 runner.open(&name);
+-                if runner.world.rimworld_floor {
+-                    rimworld::trim(runner, &name);
+-                }
+             }
+         }
+         return;
+diff --git a/crates/hud/src/menus/rimworld.rs b/crates/hud/src/menus/rimworld.rs
+index dc6f9a7..dbfa846 100644
+--- a/crates/hud/src/menus/rimworld.rs
++++ b/crates/hud/src/menus/rimworld.rs
+@@ -1,99 +1,9 @@
+-//! RimWorld x MW2 (M9): the Escape menu holds only what this game has. MW2's own in-game
+-//! menu names the map, the game type, the teams and the classes, and offers to mute other
++//! RimWorld x MW2: the Escape menu holds only what this game has. MW2's own in-game menu
++//! names the map, the game type, the teams and the classes, and offers to mute other
+ //! players; none of that exists here, where RimWorld decides everything and nobody else is
+-//! playing. Those items are hidden as the menu opens, leaving the options and the way out.
++//! playing. Hiding its items one by one could not work (M12: their text is compiled
++//! expressions, and its buttons open the class and team menus themselves), so on RimWorld's
++//! map Escape opens a menu of our own instead: resume, options, quit (`ui/menus/rimworld.json`).
+ 
+-use asset_game::MenuEvent;
+-
+-use super::runtime::Runner;
+-
+-/// An item whose text, picture or action mentions one of these is not for this game.
+-const DROPPED: &[&str] = &[
+-    "MPUI_", "MAPNAME", "CURRENT_MAP", "GAMETYPE", "GAME_TYPE", "FREE_FOR_ALL", "FFA", "CLASS",
+-    "LOADOUT", "TEAM", "MUTE", "VOICE", "FRIEND", "SQUAD", "PARTY", "CLAN", "EMBLEM",
+-    "SCOREBOARD", "RECORD", "DEMO",
+-];
+-/// An item whose name or action mentions one of these stays, whatever else it says.
+-const KEPT: &[&str] = &[
+-    "OPTION", "SETTING", "CONTROL", "RESUME", "BACK", "CLOSE", "LEAVE", "QUIT", "EXIT", "END_GAME",
+-    "ENDGAME", "DISCONNECT", "MAIN_MENU",
+-];
+-
+-/// Hides what MW2's in-game menu `name` offers that RimWorld x MW2 does not have. The items
+-/// it hides are logged once per menu, so the list above can be judged from a real game.
+-pub(crate) fn trim(runner: &mut Runner<'_, '_>, name: &str) {
+-    let Some(def) = runner.catalog.get(name) else { return };
+-    let hidden: Vec<(usize, String)> = def
+-        .items
+-        .iter()
+-        .enumerate()
+-        .filter(|(_, item)| {
+-            let scripts = scripts(&item.handlers.action) + " " + &scripts(&item.handlers.accept);
+-            drops(&words(&[&item.name, &item.text_key, &item.text_exp, &item.material_exp, &item.dvar, &scripts]))
+-        })
+-        .map(|(index, item)| (index, label(&item.name, &item.text_key)))
+-        .collect();
+-    let Some(open) = runner.menus.get_mut(&def.name) else { return };
+-    for &(index, _) in &hidden {
+-        if let Some(state) = open.items.get_mut(index) {
+-            state.hidden = true;
+-        }
+-    }
+-    if !hidden.is_empty() {
+-        let names: Vec<&str> = hidden.iter().map(|(_, label)| label.as_str()).collect();
+-        println!("[rimworld] escape menu {}: hid {}", def.name, names.join(", "));
+-    }
+-}
+-
+-/// What an item's handlers run, flattened.
+-fn scripts(events: &[MenuEvent]) -> String {
+-    events
+-        .iter()
+-        .map(|event| match event {
+-            MenuEvent::Script(line) => line.clone(),
+-            MenuEvent::If { condition, then } => format!("{condition} {}", scripts(then)),
+-            MenuEvent::Else(then) => scripts(then),
+-            MenuEvent::SetLocalVar { name, expr, .. } => format!("{name} {expr}"),
+-        })
+-        .collect::<Vec<_>>()
+-        .join(" ")
+-}
+-
+-/// Everything an item says about itself, in upper case.
+-fn words(parts: &[&str]) -> String {
+-    parts.join(" ").to_uppercase()
+-}
+-
+-/// Whether what an item says puts it out of this game: it mentions something MW2 has and
+-/// RimWorld x MW2 does not, and nothing that keeps it.
+-fn drops(said: &str) -> bool {
+-    DROPPED.iter().any(|word| said.contains(word)) && !KEPT.iter().any(|word| said.contains(word))
+-}
+-
+-/// A name for the log: the item's own, else the text it shows.
+-fn label(name: &str, text_key: &str) -> String {
+-    let name = if name.is_empty() { text_key } else { name };
+-    if name.is_empty() { "(unnamed)".to_owned() } else { name.to_owned() }
+-}
+-
+-#[cfg(test)]
+-mod tests {
+-    use super::*;
+-
+-    #[test]
+-    fn the_map_the_game_type_the_teams_and_muting_go() {
+-        assert!(drops(&words(&["", "@MPUI_CHANGE_CLASS", "", "", "", ""])));
+-        assert!(drops(&words(&["muteplayer", "", "", "", "", ""])));
+-        assert!(drops(&words(&["mapname", "", "", "\"MPUI_ESTATE\"", "", ""])));
+-        assert!(drops(&words(&["", "", "", "", "ui_gametype", ""])));
+-    }
+-
+-    #[test]
+-    fn the_options_and_the_way_out_stay() {
+-        assert!(!drops(&words(&["options", "@MENU_OPTIONS", "", "", "", ""])));
+-        assert!(!drops(&words(&["leavegame", "@MPUI_LEAVE_GAME", "", "", "", ""])));
+-        assert!(!drops(&words(&["resume", "@MENU_RESUME_GAME", "", "", "", ""])));
+-        // Leaving the game mentions the main menu, which it goes back to.
+-        assert!(!drops(&words(&["quit", "@MPUI_END_GAME", "", "", "", "open main_menu"])));
+-    }
+-}
++/// The Escape menu on RimWorld's map.
++pub(crate) const PAUSE_MENU: &str = "rimworld_pause";
+diff --git a/crates/hud/src/scorebar.rs b/crates/hud/src/scorebar.rs
+index c539afa..564379b 100644
+--- a/crates/hud/src/scorebar.rs
++++ b/crates/hud/src/scorebar.rs
+@@ -300,8 +300,8 @@ pub(crate) fn update_scorebar(
+     if !surface.is_ready() {
+         return;
+     }
+-    // A Minecraft world has no match clock or score to show.
+-    if view.is_some_and(|v| v.in_killcam()) || minecraft.is_some_and(|ui| ui.active) {
++    // A Minecraft world, or RimWorld's map, has no match clock or score to show.
++    if view.is_some_and(|v| v.in_killcam()) || minecraft.is_some_and(|ui| ui.active || ui.floor_minimap) {
+         hide(&mut pass);
+         return;
+     }
+diff --git a/crates/hud/src/scoreboard.rs b/crates/hud/src/scoreboard.rs
+index b63f61b..31aff49 100644
+--- a/crates/hud/src/scoreboard.rs
++++ b/crates/hud/src/scoreboard.rs
+@@ -286,8 +286,13 @@ pub(crate) fn update_scoreboard(
+     mut hud_images: ResMut<HudImages>,
+     mut images: ResMut<Assets<Image>>,
+     mut pass: ResMut<HudTessPass>,
++    minecraft: Option<Res<frame::MinecraftUi>>,
+ ) {
+     pass.scoreboard = TessJob::Hide;
++    // RimWorld's map has no score (Tab brings up RimWorld instead).
++    if minecraft.is_some_and(|ui| ui.floor_minimap) {
++        return;
++    }
+     let Some(snap) = presented.snapshot() else {
+         return;
+     };
+diff --git a/crates/rimworld_bridge/src/lib.rs b/crates/rimworld_bridge/src/lib.rs
+index f7e5250..02a34ac 100644
+--- a/crates/rimworld_bridge/src/lib.rs
++++ b/crates/rimworld_bridge/src/lib.rs
+@@ -10,6 +10,7 @@
+ 
+ use std::io::{BufRead, BufReader, Write};
+ use std::net::{SocketAddr, TcpListener, TcpStream};
++use std::sync::atomic::{AtomicI64, Ordering};
+ use std::sync::{Arc, Mutex};
+ use std::sync::mpsc::{self, Receiver, Sender};
+ 
+@@ -111,6 +112,46 @@ pub struct RimworldLink {
+     pub doors: Option<Arc<Doors>>,
+     /// Counts `doors` messages.
+     pub doors_revision: u64,
++    /// How fast the played colonist moves, injuries included, in cells per game second, and
++    /// game seconds per real second, from the latest snapshot (M12+).
++    pub player_speed: Option<f32>,
++    pub rate: Option<f32>,
++    /// How brightly lamps light every roofed cell, from the latest `glow` (M12+). Counted in
++    /// `world_revision`.
++    pub glow: Option<Arc<Glow>>,
++}
++
++/// MW2's own window (a Windows handle), once the engine has found it: its `hello` tells
++/// RimWorld, whose "Control in MW2" brings it up (M12+). 0 until then.
++pub static OWN_WINDOW: AtomicI64 = AtomicI64::new(0);
++
++/// Our `hello`, with MW2's window when it is known.
++pub fn hello() -> Message {
++    let window = OWN_WINDOW.load(Ordering::Relaxed);
++    Message::Hello { side: Side::Iw4l, protocol: PROTOCOL_VERSION, game_version: None, window: (window != 0).then(|| window.to_string()) }
++}
++
++/// How brightly lamps light each roofed cell (M12+), 0 dark to 15 lit, in [`Terrain`]'s order.
++#[derive(Debug, Clone, PartialEq)]
++pub struct Glow {
++    pub size: [i32; 2],
++    pub cells: Vec<u8>,
++}
++
++impl Glow {
++    /// From `glow`'s hex digits; anything else reads as dark.
++    pub fn new(size: [i32; 2], cells: &str) -> Self {
++        Self { size, cells: cells.bytes().map(|c| (c as char).to_digit(16).map_or(0, |d| d as u8)).collect() }
++    }
++
++    /// How lit cell `(x, z)` is, 0 to 1; dark off the map.
++    pub fn at(&self, x: i32, z: i32) -> f32 {
++        let [sx, sz] = self.size;
++        if !(0..sx).contains(&x) || !(0..sz).contains(&z) {
++            return 0.0;
++        }
++        self.cells.get((z * sx + x) as usize).map_or(0.0, |&level| f32::from(level) / 15.0)
++    }
+ }
+ 
+ /// How far every door on RimWorld's map has swung (M11+).
+@@ -369,11 +410,8 @@ fn serve(stream: TcpStream, tx: &Sender<BridgeEvent>, outbox: &RimworldOutbox) -
+         let line = line?;
+         match Message::from_line(&line) {
+             Ok(message) => {
+-                if matches!(message, Message::Hello { .. }) {
+-                    let reply = Message::Hello { side: Side::Iw4l, protocol: PROTOCOL_VERSION, game_version: None, window: None };
+-                    if !outbox.send(&reply) {
+-                        return Err(std::io::Error::other("could not answer hello"));
+-                    }
++                if matches!(message, Message::Hello { .. }) && !outbox.send(&hello()) {
++                    return Err(std::io::Error::other("could not answer hello"));
+                 }
+                 if tx.send(BridgeEvent::Received(message)).is_err() {
+                     return Ok(());
+@@ -412,7 +450,7 @@ fn drain_inbox(inbox: Res<RimworldInbox>, mut link: ResMut<RimworldLink>) {
+                 }
+                 link.last_tick = Some(tick);
+             }
+-            BridgeEvent::Received(Message::Snapshot { map, pawns, player_pawn, .. }) => {
++            BridgeEvent::Received(Message::Snapshot { map, pawns, player_pawn, player_speed, rate, .. }) => {
+                 let player = |pawns: &[PawnState]| pawns.iter().filter(|p| p.faction == "player").count();
+                 if link.snapshots == 0 || pawns.len() != link.pawns.len() || player(&pawns) != player(&link.pawns) {
+                     let size = map.or(link.map_size).map_or_else(|| "?".to_owned(), |[x, z]| format!("{x}x{z}"));
+@@ -428,6 +466,8 @@ fn drain_inbox(inbox: Res<RimworldInbox>, mut link: ResMut<RimworldLink>) {
+                     }
+                 }
+                 link.player_pawn = player_pawn;
++                link.player_speed = player_speed;
++                link.rate = rate;
+                 link.pawns = pawns;
+                 link.snapshots += 1;
+             }
+@@ -480,6 +520,18 @@ fn drain_inbox(inbox: Res<RimworldInbox>, mut link: ResMut<RimworldLink>) {
+                 link.roofs = Some(Arc::new(Roofs { size, cells: cells.into_bytes(), hills }));
+                 link.world_revision += 1;
+             }
++            BridgeEvent::Received(Message::Glow { size, cells }) => {
++                let [x, z] = size;
++                if cells.len() != usize::try_from(x.max(0) * z.max(0)).unwrap_or(0) {
++                    report(&format!("ignored glow: {} cells for a {x}x{z} map", cells.len()));
++                    continue;
++                }
++                let glow = Glow::new(size, &cells);
++                if link.glow.as_deref() != Some(&glow) {
++                    link.glow = Some(Arc::new(glow));
++                    link.world_revision += 1;
++                }
++            }
+             BridgeEvent::Received(Message::Textures { dir, names }) => {
+                 if link.textures.is_none() {
+                     report(&format!("RimWorld art: {} pictures in {dir}", names.len()));
+diff --git a/crates/rimworld_world/src/detail.rs b/crates/rimworld_world/src/detail.rs
+index d5be889..58cb945 100644
+--- a/crates/rimworld_world/src/detail.rs
++++ b/crates/rimworld_world/src/detail.rs
+@@ -12,7 +12,7 @@
+ //! building models are in block space.
+ use std::collections::{HashMap, HashSet, VecDeque};
+ 
+-use rimworld_bridge::{BuildingState, Roofs, Skins, Terrain, roof, terrain};
++use rimworld_bridge::{BuildingState, Glow, Roofs, Skins, Terrain, roof, terrain};
+ 
+ use super::{BUILT_HEIGHT, CELL, ROCK_HEIGHT};
+ 
+@@ -26,6 +26,18 @@ const RISE_LIMIT: [i32; 6] = [10, 2, 4, 8, 14, 20];
+ /// How dark faces are under a roof: rock (caves), and built.
+ pub(crate) const UNDER_ROCK: f32 = 0.55;
+ pub(crate) const UNDER_ROOF: f32 = 0.78;
++/// How much darker than that a roofed cell no lamp reaches is, once RimWorld says where its
++/// lamps shine (M12), so a lit room stands out.
++const UNLIT: f32 = 0.6;
++/// Where a shelf's boards start, in blocks up; what is stored on one stands on its top.
++pub(crate) const SHELF_BOARDS: [f32; 4] = [0.05, 0.65, 1.25, 1.84];
++pub(crate) const SHELF_BOARD: f32 = 0.06;
++
++/// Whether a building is a shelf things are stored on.
++pub(crate) fn is_shelf(def: &str) -> bool {
++    let def = def.to_lowercase();
++    def.contains("shelf") || def.contains("bookcase")
++}
+ 
+ /// No skin: the cell keeps MW2's texture.
+ const NO_SKIN: u16 = u16::MAX;
+@@ -94,6 +106,11 @@ pub(crate) struct Detail {
+     pub(crate) max_top: i32,
+     /// Building models, by the 16 by 16 chunk holding each building's middle.
+     parts: HashMap<(i32, i32), Vec<Part>>,
++    /// RimWorld cells (`x`, `z` north) a shelf stands on, so what is stored there sits on
++    /// its boards (M12).
++    shelves: HashSet<(i32, i32)>,
++    /// How brightly lamps light each cell, 0 to 15, once RimWorld has said (M12).
++    lit: Option<Vec<u8>>,
+ }
+ 
+ impl Detail {
+@@ -106,6 +123,7 @@ impl Detail {
+         skins: Option<&Skins>,
+         buildings: &[BuildingState],
+         textures: &[String],
++        glow: Option<&Glow>,
+     ) -> Self {
+         let sides = side_pictures(textures);
+         let textures = textures.len();
+@@ -122,6 +140,8 @@ impl Detail {
+             sides,
+             max_top: ROCK_HEIGHT,
+             parts: HashMap::new(),
++            shelves: HashSet::new(),
++            lit: glow.map(|_| vec![0; cells]),
+         };
+         let code = |x: i32, z: i32| terrain.and_then(|t| t.at(x, rim(z)));
+         for z in 0..size {
+@@ -130,6 +150,9 @@ impl Detail {
+                 if let Some(roofs) = roofs {
+                     detail.roof[i] = roofs.at(x, rim(z));
+                 }
++                if let (Some(glow), Some(lit)) = (glow, detail.lit.as_mut()) {
++                    lit[i] = (glow.at(x, rim(z)) * 15.0).round() as u8;
++                }
+                 if let Some(skins) = skins {
+                     detail.wall[i] = skins.wall(x, rim(z)).and_then(texture).unwrap_or(NO_SKIN);
+                     detail.floor[i] = skins.floor(x, rim(z)).and_then(texture).unwrap_or(NO_SKIN);
+@@ -159,6 +182,9 @@ impl Detail {
+             .flat_map(|b| cells_of(b.rect))
+             .collect();
+         for building in buildings {
++            if is_shelf(&building.def) {
++                detail.shelves.extend(cells_of(building.rect));
++            }
+             let (parts, body) = model_of(building, &fences);
+             if parts.is_empty() {
+                 continue;
+@@ -176,11 +202,7 @@ impl Detail {
+             let c = CELL as f32;
+             let rect = [x0 as f32 * c, (size - 1 - z1) as f32 * c, (x1 + 1) as f32 * c, (size - z0) as f32 * c];
+             let (mx, mz) = ((x0 + x1) / 2 * CELL, rim((z0 + z1) / 2) * CELL);
+-            let light = match detail.roof_at(mx, mz) {
+-                roof::ROCK | roof::THICK => UNDER_ROCK,
+-                roof::BUILT => UNDER_ROOF,
+-                _ => 1.0,
+-            };
++            let light = detail.light(mx, mz);
+             let sprite = Sprite { at: building.at, draw: building.draw, turn: building.turn, size };
+             let tex = u16::try_from(building.tex).ok().and_then(texture);
+             let chunk = (mx >> 4, mz >> 4);
+@@ -194,6 +216,31 @@ impl Detail {
+         detail
+     }
+ 
++    /// How light faces looking into the cell holding block point `(x, z)` below the roofs
++    /// are. Open sky is fully lit. Under a roof, RimWorld's lamps light it (M12): dark where
++    /// none reaches, fully where RimWorld counts it lit; before RimWorld says, dim under a
++    /// built roof and dark in a cave.
++    pub(crate) fn light(&self, x: i32, z: i32) -> f32 {
++        let roof = self.roof_at(x, z);
++        let dark = match roof {
++            roof::ROCK | roof::THICK => UNDER_ROCK,
++            roof::BUILT => UNDER_ROOF,
++            _ => return 1.0,
++        };
++        match (&self.lit, self.index(x, z)) {
++            (Some(lit), Some(i)) => {
++                let unlit = dark * UNLIT;
++                unlit + (1.0 - unlit) * f32::from(lit[i]) / 15.0
++            }
++            _ => dark,
++        }
++    }
++
++    /// Whether a shelf stands on RimWorld cell `(x, z)` (`z` north).
++    pub(crate) fn shelf(&self, x: i32, z: i32) -> bool {
++        self.shelves.contains(&(x, z))
++    }
++
+     /// The cell holding block point `(x, z)`.
+     fn index(&self, x: i32, z: i32) -> Option<usize> {
+         let (x, z) = (x.div_euclid(CELL), z.div_euclid(CELL));
+@@ -238,9 +285,10 @@ impl Detail {
+     }
+ 
+     /// Everything about the cell at block `(x, z)` that changes its blocks.
+-    pub(crate) fn signature(&self, x: i32, z: i32) -> (u8, u8, u16, u16, Model) {
+-        self.index(x, z).map_or((roof::NONE, 0, NO_SKIN, NO_SKIN, Model::None), |i| {
+-            (self.roof[i], self.top[i], self.wall[i], self.floor[i], self.model[i])
++    pub(crate) fn signature(&self, x: i32, z: i32) -> (u8, u8, u16, u16, Model, u8) {
++        self.index(x, z).map_or((roof::NONE, 0, NO_SKIN, NO_SKIN, Model::None, 0), |i| {
++            let lit = self.lit.as_ref().map_or(0, |lit| lit[i]);
++            (self.roof[i], self.top[i], self.wall[i], self.floor[i], self.model[i], lit)
+         })
+     }
+ }
+@@ -365,7 +413,7 @@ fn model_of(building: &BuildingState, fences: &HashSet<(i32, i32)>) -> (Vec<Loca
+     } else if has("shelf") || has("bookcase") {
+         let t = 0.06;
+         parts.extend(legs(0.03, t, 1.9));
+-        for y in [0.05, 0.65, 1.25, 1.84] {
++        for y in SHELF_BOARDS {
+             parts.push([0.03, y, 0.05, 0.97, y + 0.06, 0.97]);
+         }
+         parts.push([0.03, 0.0, 0.0, 0.97, 1.9, 0.05]);
+@@ -409,8 +457,9 @@ fn model_of(building: &BuildingState, fences: &HashSet<(i32, i32)>) -> (Vec<Loca
+         parts.push([0.15, 0.0, 0.15, 0.85, 0.15, 0.85]);
+         body = 0.15;
+     } else if has("walllamp") || has("wall_lamp") {
+-        // Hung on the wall behind it.
+-        parts.push([0.35, 1.55, 0.0, 0.65, 1.95, 0.22]);
++        // Hung on the wall it faces (RimWorld turns an attachment towards its wall), just
++        // touching it.
++        parts.push([0.35, 1.55, 0.8, 0.65, 1.95, 1.0]);
+         body = 0.0;
+     } else if has("lamp") || has("torch") || has("sunlamp") {
+         parts.push([0.32, 0.0, 0.32, 0.68, 0.08, 0.68]);
+@@ -561,14 +610,14 @@ mod tests {
+         }
+         let terrain = Terrain { size: [9, 9], cells };
+         let roofs = Roofs { size: [9, 9], cells: vec![roof::NONE; 81], hills: 4 };
+-        let detail = Detail::new(9, Some(&terrain), Some(&roofs), None, &[], &[]);
++        let detail = Detail::new(9, Some(&terrain), Some(&roofs), None, &[], &[], None);
+         assert_eq!(detail.top(b(0), b(4)), 0);
+         assert_eq!(detail.top(b(1) + 1, b(4)), ROCK_HEIGHT, "the edge is plain rock height");
+         assert_eq!(detail.top(b(8), b(4)), ROCK_HEIGHT + ((7.0 * RISE) as i32).min(RISE_LIMIT[4]));
+         assert!(detail.top(b(5), b(4)) > detail.top(b(2), b(4)));
+         // Flat land keeps its hills low.
+         let flat = Roofs { hills: 1, ..roofs };
+-        let detail = Detail::new(9, Some(&terrain), Some(&flat), None, &[], &[]);
++        let detail = Detail::new(9, Some(&terrain), Some(&flat), None, &[], &[], None);
+         assert_eq!(detail.top(b(8), b(4)), ROCK_HEIGHT + RISE_LIMIT[1]);
+     }
+ 
+@@ -581,7 +630,7 @@ mod tests {
+         let mut roof_cells = vec![roof::NONE; 25];
+         roof_cells[12] = roof::THICK;
+         let roofs = Roofs { size: [5, 5], cells: roof_cells, hills: 3 };
+-        let detail = Detail::new(5, Some(&terrain), Some(&roofs), None, &[], &[]);
++        let detail = Detail::new(5, Some(&terrain), Some(&roofs), None, &[], &[], None);
+         assert!(detail.top(b(2), b(2)) >= ROCK_HEIGHT);
+         assert_eq!(detail.roof_at(b(2) + 1, b(2) + 1), roof::THICK);
+     }
+@@ -602,7 +651,7 @@ mod tests {
+         // RimWorld cells x 3, z 4..5, facing north: cells z 4..5 from the north on a 10 cell
+         // map, blocks z 8..12.
+         let bed = building("Bed", [3, 4, 3, 5], 0);
+-        let detail = Detail::new(10, None, None, None, &[bed], &names(1));
++        let detail = Detail::new(10, None, None, None, &[bed], &names(1), None);
+         let parts = detail.parts(0, 0);
+         assert_eq!(parts.len(), 3);
+         // The headboard reaches the north end, block z 8, and the bed is two blocks wide.
+@@ -611,10 +660,44 @@ mod tests {
+         assert_eq!(detail.model(b(3), b(5)), Model::Low);
+         assert_eq!(parts[0].tex, Some(0));
+         // A picture RimWorld did not send is none.
+-        let detail = Detail::new(10, None, None, None, &[building("Bed", [3, 4, 3, 5], 0)], &[]);
++        let detail = Detail::new(10, None, None, None, &[building("Bed", [3, 4, 3, 5], 0)], &[], None);
+         assert_eq!(detail.parts(0, 0)[0].tex, None);
+     }
+ 
++    #[test]
++    fn a_wall_lamp_hangs_on_the_wall_it_faces() {
++        // RimWorld cell (3, 4) facing north, so its wall is the cell north of it: on a 10
++        // cell map, blocks z 10..12, the wall's side at block z 10.
++        let detail = Detail::new(10, None, None, None, &[building("WallLamp", [3, 4, 3, 4], 0)], &[], None);
++        let parts = detail.parts(0, 0);
++        assert_eq!(parts.len(), 1);
++        assert!((parts[0].bounds[2] - b(5) as f32).abs() < 1e-5, "{:?}", parts[0].bounds);
++    }
++
++    #[test]
++    fn lamps_light_the_rooms_they_shine_in() {
++        // A 3 by 3 room under a built roof, lit only in the middle; the cell east of it
++        // open to the sky.
++        let mut roof_cells = vec![roof::BUILT; 9];
++        roof_cells[5] = roof::NONE;
++        let roofs = Roofs { size: [3, 3], cells: roof_cells, hills: 1 };
++        let glow = Glow::new([3, 3], "0000f0000");
++        let detail = Detail::new(3, None, Some(&roofs), None, &[], &[], Some(&glow));
++        assert_eq!(detail.light(b(1), b(1)), 1.0, "lit");
++        assert!((detail.light(b(0), b(1)) - UNDER_ROOF * UNLIT).abs() < 1e-5, "dark");
++        assert_eq!(detail.light(b(2), b(1)), 1.0, "open sky");
++        // Before RimWorld says where its lamps shine, roofed is dim.
++        let detail = Detail::new(3, None, Some(&roofs), None, &[], &[], None);
++        assert_eq!(detail.light(b(1), b(1)), UNDER_ROOF);
++    }
++
++    #[test]
++    fn shelves_are_known_by_their_cells() {
++        let detail = Detail::new(10, None, None, None, &[building("Shelf", [3, 4, 4, 4], 0)], &[], None);
++        assert!(detail.shelf(3, 4) && detail.shelf(4, 4));
++        assert!(!detail.shelf(5, 4));
++    }
++
+     #[test]
+     fn sprites_lie_as_rimworld_draws_them() {
+         // A 2 by 1 picture at RimWorld (5, 5) on a 10 cell map: block (5, 5).
+@@ -634,7 +717,7 @@ mod tests {
+     fn fences_link_to_their_neighbours() {
+         let a = building("Fence", [3, 3, 3, 3], 0);
+         let b = building("Fence", [4, 3, 4, 3], 0);
+-        let detail = Detail::new(10, None, None, None, &[a, b], &names(1));
++        let detail = Detail::new(10, None, None, None, &[a, b], &names(1), None);
+         // A post and two rails each.
+         assert_eq!(detail.parts(0, 0).len(), 6);
+     }
+diff --git a/crates/rimworld_world/src/lib.rs b/crates/rimworld_world/src/lib.rs
+index 43056a7..1b5b012 100644
+--- a/crates/rimworld_world/src/lib.rs
++++ b/crates/rimworld_world/src/lib.rs
+@@ -88,11 +88,12 @@ use sim::voxel::{BLOCK, VoxelChunk};
+ const DEFAULT_SIZE: i32 = 250;
+ /// Blocks a RimWorld cell spans each way.
+ const CELL: i32 = 2;
+-/// A healthy colonist's speed in RimWorld (`MoveSpeed`), cells a second, and the ticks it
+-/// takes a cell at that speed; RimWorld adds a tree's `pathCost` to a cell with a tree.
++/// A healthy colonist's speed in RimWorld (`MoveSpeed`), cells a game second, when RimWorld
++/// does not say; RimWorld adds a tree's `pathCost` ticks to a cell with a tree.
+ const COLONIST_SPEED: f32 = 4.6;
+-const TICKS_PER_CELL: f32 = 60.0 / COLONIST_SPEED;
+ const TREE_PATH_COST: f32 = 42.0;
++/// The fastest game speed MW2 keeps up with: past it the player would skip through walls.
++const MAX_RATE: f32 = 6.0;
+ /// MW2's run speed (`g_speed`, map units a second) and how much faster sprinting is.
+ const MW2_RUN_SPEED: f32 = 190.0;
+ const MW2_SPRINT_SCALE: f32 = 1.5;
+@@ -266,6 +267,8 @@ impl Plugin for RimworldWorldPlugin {
+                 present_booms.after(update).in_set(frame::ClientSet::Present),
+                 sync_loot.after(update).in_set(frame::ClientSet::Present),
+                 rimview::tab_to_rimworld.after(update).in_set(frame::ClientSet::Present),
++                rimview::one_window.after(update).in_set(frame::ClientSet::Present),
++                use_key.after(update).in_set(frame::ClientSet::Present),
+                 spectate_camera
+                     .after(update)
+                     .after(render_anim::sync_camera_from_presented)
+@@ -279,6 +282,25 @@ impl Plugin for RimworldWorldPlugin {
+ /// RimWorld's looting, between the link and the HUD's loot panel: what the played
+ /// colonist has and can reach goes up to the panel, and the panel's clicks go to RimWorld,
+ /// which does the taking and dropping with its own rules.
++/// E while playing a colonist (M12): they work the nearest door or switch in front of them,
++/// as RimWorld decides.
++fn use_key(
++    floor: Res<FlatFloor>,
++    keys: Option<Res<ButtonInput<KeyCode>>>,
++    hud_input: Option<Res<frame::HudInputView>>,
++    outbox: Option<Res<RimworldOutbox>>,
++) {
++    if !floor.active || !keys.is_some_and(|keys| keys.just_pressed(KeyCode::KeyE)) {
++        return;
++    }
++    if hud_input.is_some_and(|input| input.console_open || input.script_menu_open) {
++        return;
++    }
++    if let (Some(pawn), Some(outbox)) = (floor.playing.clone(), outbox) {
++        outbox.send(&BridgeMessage::Use { pawn });
++    }
++}
++
+ fn sync_loot(
+     floor: Res<FlatFloor>,
+     link: Option<Res<RimworldLink>>,
+@@ -592,6 +614,9 @@ struct Figure {
+     /// cells: see [`card`].
+     art: Option<[i32; 3]>,
+     draw: Option<[f32; 2]>,
++    /// How many times RimWorld says it has been hurt, and seconds left of its red flash (M12).
++    hurt: u32,
++    flash: f32,
+ }
+ 
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+@@ -814,7 +839,10 @@ fn update(
+             stop_spectating(&mut floor, &mut authority, local.0);
+         }
+         play_colonist(&mut floor, &mut authority, local.0, player, outbox.as_deref(), time.delta_secs());
+-        match_colonist_speed(&floor, &mut authority, local.0, player.is_some());
++        let speed = link.as_deref().map_or((COLONIST_SPEED, 1.0), |link| {
++            (link.player_speed.unwrap_or(COLONIST_SPEED), link.rate.unwrap_or(1.0))
++        });
++        match_colonist_speed(&floor, &mut authority, local.0, player.is_some().then_some(speed));
+         // While playing a colonist, the player has only the colonist's gun, and while
+         // spectating nothing: none of the Minecraft map's extra guns.
+         let own_guns = player.is_some() || floor.spectating;
+@@ -1028,35 +1056,41 @@ fn play_colonist(
+     }
+ }
+ 
+-/// While the player plays a colonist, sprinting moves them as fast as a healthy drafted
+-/// colonist walks in RimWorld, cell for cell, whatever gun they hold; and through a tree as
+-/// slowly as RimWorld's pawns go through one. Otherwise MW2's own speed.
+-fn match_colonist_speed(floor: &FlatFloor, authority: &mut net::AuthorityWorld, local: sim::ClientId, playing: bool) {
++/// While the player plays a colonist (`playing` holds its RimWorld `MoveSpeed` and the game
++/// speed), sprinting moves them as fast as that colonist runs in RimWorld, injuries and all,
++/// cell for cell, whatever gun they hold, sped up with the game; for as long as they like
++/// (M12); and through a tree as slowly as RimWorld's pawns go through one. Otherwise MW2's
++/// own speed and sprint.
++fn match_colonist_speed(floor: &FlatFloor, authority: &mut net::AuthorityWorld, local: sim::ClientId, playing: Option<(f32, f32)>) {
+     let Some(ps) = authority.0.player(local) else {
+         return;
+     };
+-    let scale = if playing {
++    let scale = if let Some((speed, rate)) = playing {
+         let gun = authority.0.content().weapon_move_speed_scale(ps.weapon);
+         let gun = if ps.weapon != 0 && gun > 0.0 { gun } else { 1.0 };
+         let [x, z] = floor.map_to_rimworld(ps.origin);
+         let block = rimworld_block(floor.size, x, 0.0, z);
+         let in_tree = floor.lay().code(block.x.floor() as i32, block.z.floor() as i32) == Some(terrain::TREE);
+-        colonist_speed_scale(gun, in_tree)
++        colonist_speed_scale(speed, rate, gun, in_tree)
+     } else {
+         1.0
+     };
+     if (ps.move_speed_scale_multiplier - scale).abs() > 1e-3 {
+         authority.0.set_move_speed_scale(local, scale);
+     }
++    authority.0.set_unlimited_sprint(local, playing.is_some());
+ }
+ 
+ /// The move speed scale that makes MW2's sprint, holding a gun whose `moveSpeedScale` is
+-/// `gun`, as fast as a healthy colonist: [`COLONIST_SPEED`] cells a second, [`CELL`] blocks
+-/// each; in a tree, as much slower as RimWorld's path cost makes a pawn.
+-fn colonist_speed_scale(gun: f32, in_tree: bool) -> f32 {
+-    let wanted = COLONIST_SPEED * CELL as f32 * BLOCK;
++/// `gun`, as fast as a colonist running `speed` cells a game second at `rate` game seconds
++/// a real second, [`CELL`] blocks a cell; in a tree, as much slower as RimWorld's path cost
++/// makes a pawn.
++fn colonist_speed_scale(speed: f32, rate: f32, gun: f32, in_tree: bool) -> f32 {
++    let speed = speed.max(0.1);
++    let wanted = speed * rate.clamp(1.0, MAX_RATE) * CELL as f32 * BLOCK;
+     let sprint = MW2_RUN_SPEED * MW2_SPRINT_SCALE * gun.max(0.1);
+-    let tree = if in_tree { TICKS_PER_CELL / (TICKS_PER_CELL + TREE_PATH_COST) } else { 1.0 };
++    let ticks_per_cell = 60.0 / speed;
++    let tree = if in_tree { ticks_per_cell / (ticks_per_cell + TREE_PATH_COST) } else { 1.0 };
+     wanted / sprint * tree
+ }
+ 
+@@ -1538,7 +1572,7 @@ fn detail_of(size: i32, terrain: Option<&Terrain>, link: Option<&RimworldLink>)
+     }
+     let textures = link.textures.as_ref().map_or(&[][..], |textures| textures.names.as_slice());
+     let buildings = link.buildings.as_deref().map_or(&[][..], Vec::as_slice);
+-    Some(Arc::new(Detail::new(size, terrain, link.roofs.as_deref(), link.skins.as_deref(), buildings, textures)))
++    Some(Arc::new(Detail::new(size, terrain, link.roofs.as_deref(), link.skins.as_deref(), buildings, textures, link.glow.as_deref())))
+ }
+ 
+ /// Makes the atlas again when RimWorld has sent new art. Whether it did.
+@@ -1704,17 +1738,12 @@ enum Tex {
+     Small(u16, [i32; 2]),
+ }
+ 
+-/// How light faces looking into cell `(x, z)` below the roofs are: dark in a cave, dim under
+-/// a built roof.
++/// How light faces looking into cell `(x, z)` below the roofs are: see [`Detail::light`].
+ fn light_in(lay: Lay, x: i32, z: i32, y: i32) -> f32 {
+     if y >= BUILT_HEIGHT {
+         return 1.0;
+     }
+-    match lay.detail.map_or(roof::NONE, |detail| detail.roof_at(x, z)) {
+-        roof::ROCK | roof::THICK => detail::UNDER_ROCK,
+-        roof::BUILT => detail::UNDER_ROOF,
+-        _ => 1.0,
+-    }
++    lay.detail.map_or(1.0, |detail| detail.light(x, z))
+ }
+ 
+ /// The faces of one block that are not against another solid block. With `tree_models`,
+@@ -2348,8 +2377,11 @@ fn figure_of(pawn: &PawnState, size: i32) -> Figure {
+         },
+         downed: pawn.downed,
+         gun: mw2_weapon(pawn.weapon.as_deref()),
+-        art: pawn.art.filter(|_| pawn.kind.as_deref() != Some("humanlike")),
++        // People too, once RimWorld draws them (M10): `RWMW2_RIMWORLD_PAWNS=0` keeps MW2 soldiers.
++        art: pawn.art.filter(|_| pawn.kind.as_deref() != Some("humanlike") || rimworld_pictures().0),
+         draw: pawn.draw,
++        hurt: pawn.hurt.unwrap_or(0),
++        flash: 0.0,
+     }
+ }
+ 
+@@ -2371,7 +2403,9 @@ fn follow_pawns(figures: &mut HashMap<String, Figure>, pawns: &[PawnState], size
+                 let walking = !target.downed && vx.hypot(vz) > FACE_WALK_FROM;
+                 let want = if walking { heading(vx, vz) } else { target.yaw };
+                 let yaw = turn_towards(figure.yaw, want, turn);
+-                *figure = Figure { x, z, yaw, vx, vz, ..target };
++                // Hurt since the last snapshot: red, fading, as RimWorld flashes it.
++                let flash = if target.hurt > figure.hurt { HURT_FLASH } else { (figure.flash - dt).max(0.0) };
++                *figure = Figure { x, z, yaw, vx, vz, flash, ..target };
+             }
+             _ => {
+                 figures.insert(pawn.id.clone(), target);
+@@ -2481,9 +2515,16 @@ struct Cards<'a> {
+ /// Blocks an animal's or mech's picture spans for each cell RimWorld draws it across: as a
+ /// colonist, drawn about a cell tall, is about as tall as an MW2 soldier.
+ const PICTURE_SCALE: f32 = 1.5;
++/// A pawn just hurt flashes red for this many seconds, this much of green and blue gone at
++/// first, as RimWorld's damage flash (M12).
++const HURT_FLASH: f32 = 0.35;
++const HURT_RED: f32 = 0.75;
++const WHITE: [f32; 4] = [1.0; 4];
+ /// The longer side of the picture of something on the ground, in blocks; how far from the
+ /// eye they are drawn, in blocks, and the most drawn.
+-const ITEM_SIZE: f32 = 0.9;
++const ITEM_SIZE: f32 = 0.6;
++/// The longer side of something stored on a shelf: under the 0.54 blocks between its boards.
++const SHELF_ITEM_SIZE: f32 = 0.45;
+ const ITEM_REACH: f32 = 120.0;
+ const MAX_ITEMS: usize = 3000;
+ 
+@@ -2537,6 +2578,8 @@ fn add_card(
+     [width, height]: [f32; 2],
+     flip: bool,
+     lying: bool,
++    lift: f32,
++    color: [f32; 4],
+ ) {
+     // Across the view, to its right.
+     let look = eye.map_or(Vec2::new(0.0, -1.0), |eye| Vec2::new(x - eye[0] as f32, z - eye[2] as f32)).normalize_or(Vec2::new(0.0, -1.0));
+@@ -2549,9 +2592,9 @@ fn add_card(
+     let base = vertices.len() as u32;
+     for ((r, y), uv) in corners.into_iter().zip(pictured) {
+         vertices.push(Vertex {
+-            position: [x + right.x * r, y + 0.01, z + right.y * r],
++            position: [x + right.x * r, y + lift + 0.01, z + right.y * r],
+             uv: small_uv(tex, uv),
+-            color: [1.0, 1.0, 1.0, 1.0],
++            color,
+             sky_light: 15.0,
+             block_light: 0.0,
+         });
+@@ -2561,10 +2604,14 @@ fn add_card(
+ }
+ 
+ /// Everything lying on the ground near the eye, as RimWorld's picture of it standing on its
+-/// cell facing the eye, so it is plain what it is: the nearest [`MAX_ITEMS`].
++/// cell facing the eye, so it is plain what it is: the nearest [`MAX_ITEMS`]. What is stored
++/// on a shelf stands on its boards, one stack a board, small enough to fit under the next
++/// (M12).
+ fn add_items(vertices: &mut Vec<Vertex>, indices: &mut Vec<u32>, cards: &Cards, size: i32) {
+     let eye = cards.eye.map_or(Vec2::ZERO, |eye| Vec2::new(eye[0] as f32, eye[2] as f32));
+-    let mut near: Vec<(f32, Vec3, u16, [f32; 4])> = cards
++    let shelf = |x: i32, z: i32| cards.lay.and_then(|lay| lay.detail).is_some_and(|detail| detail.shelf(x, z));
++    let mut stacks: HashMap<(i32, i32), usize> = HashMap::new();
++    let mut near: Vec<(f32, Vec3, u16, [f32; 4], f32, f32)> = cards
+         .items
+         .iter()
+         .filter_map(|item| {
+@@ -2572,14 +2619,22 @@ fn add_items(vertices: &mut Vec<Vertex>, indices: &mut Vec<u32>, cards: &Cards,
+             let bounds = *cards.cutouts.get(&tex)?;
+             let at = rimworld_block(size, item.x as f32 + 0.5, 0.0, item.z as f32 + 0.5);
+             let distance = Vec2::new(at.x, at.z).distance(eye);
+-            (cards.eye.is_none() || distance <= ITEM_REACH).then_some((distance, at, tex, bounds))
++            let (lift, most) = if shelf(item.x, item.z) {
++                let slot = stacks.entry((item.x, item.z)).or_default();
++                let board = detail::SHELF_BOARDS[*slot % (detail::SHELF_BOARDS.len() - 1)];
++                *slot += 1;
++                (board + detail::SHELF_BOARD, SHELF_ITEM_SIZE)
++            } else {
++                (0.0, ITEM_SIZE)
++            };
++            (cards.eye.is_none() || distance <= ITEM_REACH).then_some((distance, at, tex, bounds, lift, most))
+         })
+         .collect();
+     near.sort_by(|a, b| a.0.total_cmp(&b.0));
+-    for (_, at, tex, bounds) in near.into_iter().take(MAX_ITEMS) {
++    for (_, at, tex, bounds, lift, most) in near.into_iter().take(MAX_ITEMS) {
+         let (w, h) = (bounds[2] - bounds[0], bounds[3] - bounds[1]);
+-        let scale = ITEM_SIZE / w.max(h).max(1e-3);
+-        add_card(vertices, indices, [at.x, at.z], cards.eye, tex, bounds, [w * scale, h * scale], false, false);
++        let scale = most / w.max(h).max(1e-3);
++        add_card(vertices, indices, [at.x, at.z], cards.eye, tex, bounds, [w * scale, h * scale], false, false, lift, WHITE);
+     }
+ }
+ 
+@@ -2630,7 +2685,7 @@ fn add_plants(vertices: &mut Vec<Vertex>, indices: &mut Vec<u32>, cards: &Cards,
+         let (w, h) = (bounds[2] - bounds[0], bounds[3] - bounds[1]);
+         let scale = cells * cell / w.max(h).max(1e-3);
+         let at = rimworld_block(size, x, 0.0, z);
+-        add_card(vertices, indices, [at.x, at.z], cards.eye, tex, bounds, [w * scale, h * scale], false, false);
++        add_card(vertices, indices, [at.x, at.z], cards.eye, tex, bounds, [w * scale, h * scale], false, false, 0.0, WHITE);
+     };
+     for plant in cards.plants {
+         let Some(tex) = plant_picture(art, &plant.kind, plant.x, plant.z) else { continue };
+@@ -2719,7 +2774,9 @@ fn figure_mesh<'a>(figures: impl Iterator<Item = &'a Figure>, tracers: &[Tracer]
+     for figure in figures {
+         if let Some(card) = card(figure, cards.cutouts, cards.eye) {
+             let at = [figure.x, figure.z];
+-            add_card(&mut vertices, &mut indices, at, cards.eye, card.tex, card.bounds, [card.width, card.height], card.flip, figure.downed);
++            let red = 1.0 - HURT_RED * (figure.flash / HURT_FLASH).clamp(0.0, 1.0);
++            let color = [1.0, red, red, 1.0];
++            add_card(&mut vertices, &mut indices, at, cards.eye, card.tex, card.bounds, [card.width, card.height], card.flip, figure.downed, 0.0, color);
+             continue;
+         }
+         let body = match (figure.side, figure.kind) {
+@@ -3636,7 +3693,7 @@ mod tests {
+         // Soil under a built roof, a wall under it too, soil under rock: a cave's mouth.
+         let terrain = Terrain { size: [3, 1], cells: b".W.".to_vec() };
+         let roofs = rimworld_bridge::Roofs { size: [3, 1], cells: b"ccr".to_vec(), hills: 3 };
+-        let detail = Detail::new(3, Some(&terrain), Some(&roofs), None, &[], &[]);
++        let detail = Detail::new(3, Some(&terrain), Some(&roofs), None, &[], &[], None);
+         let lay = Lay { size: 3, terrain: Some(&terrain), detail: Some(&detail), doors: None };
+         // RimWorld row 0 is cell row 2.
+         assert_eq!(lay.cell(b(0), BUILT_HEIGHT, b(2)), Cell::Roof);
+@@ -3868,9 +3925,38 @@ mod tests {
+             faction: "player".into(),
+             art: None,
+             draw: None,
++            hurt: None,
+         }
+     }
+ 
++    #[test]
++    fn a_hurt_pawn_flashes_red_then_fades() {
++        let mut figures = HashMap::new();
++        follow_pawns(&mut figures, &[pawn("a", 10.5, 0.5)], 250, 0.016);
++        assert_eq!(figures["a"].flash, 0.0, "hurt before it was seen is old news");
++        let hurt = PawnState { hurt: Some(1), ..pawn("a", 10.5, 0.5) };
++        follow_pawns(&mut figures, std::slice::from_ref(&hurt), 250, 0.016);
++        assert_eq!(figures["a"].flash, HURT_FLASH);
++        follow_pawns(&mut figures, std::slice::from_ref(&hurt), 250, 0.1);
++        assert!((figures["a"].flash - (HURT_FLASH - 0.1)).abs() < 1e-5);
++        follow_pawns(&mut figures, std::slice::from_ref(&hurt), 250, 1.0);
++        assert_eq!(figures["a"].flash, 0.0);
++    }
++
++    #[test]
++    fn sprint_keeps_pace_with_the_colonist_and_the_game() {
++        let healthy = colonist_speed_scale(COLONIST_SPEED, 1.0, 1.0, false);
++        // A limping colonist is slower, three times speed is three times faster, and past
++        // the fastest MW2 keeps up with it goes no faster.
++        assert!((colonist_speed_scale(COLONIST_SPEED / 2.0, 1.0, 1.0, false) - healthy / 2.0).abs() < 1e-5);
++        assert!((colonist_speed_scale(COLONIST_SPEED, 3.0, 1.0, false) - healthy * 3.0).abs() < 1e-4);
++        assert_eq!(colonist_speed_scale(COLONIST_SPEED, 15.0, 1.0, false), colonist_speed_scale(COLONIST_SPEED, MAX_RATE, 1.0, false));
++        // Sprinting, a healthy colonist covers 4.6 cells a second.
++        let sprint = MW2_RUN_SPEED * MW2_SPRINT_SCALE * healthy;
++        assert!((sprint - COLONIST_SPEED * CELL as f32 * BLOCK).abs() < 1e-2);
++        assert!(colonist_speed_scale(COLONIST_SPEED, 1.0, 1.0, true) < healthy);
++    }
++
+     #[test]
+     fn figures_follow_pawns_with_north_up() {
+         let mut figures = HashMap::new();
+diff --git a/crates/rimworld_world/src/rimview.rs b/crates/rimworld_world/src/rimview.rs
+index f900603..651de41 100644
+--- a/crates/rimworld_world/src/rimview.rs
++++ b/crates/rimworld_world/src/rimview.rs
+@@ -186,6 +186,130 @@ mod window {
+     pub(super) fn bring_up(_rimworld: i64) -> Option<i64> {
+         None
+     }
++
++    #[cfg(windows)]
++    #[link(name = "user32")]
++    unsafe extern "system" {
++        fn EnumWindows(callback: unsafe extern "system" fn(isize, isize) -> i32, param: isize) -> i32;
++        fn GetWindowThreadProcessId(window: isize, process: *mut u32) -> u32;
++        fn IsWindowVisible(window: isize) -> i32;
++        fn GetWindow(window: isize, command: u32) -> isize;
++        fn ShowWindow(window: isize, command: i32) -> i32;
++        fn SetForegroundWindow(window: isize) -> i32;
++    }
++
++    /// This game's own window: the first visible top-level window of this process.
++    #[cfg(windows)]
++    pub(super) fn own() -> Option<i64> {
++        unsafe extern "system" fn each(window: isize, found: isize) -> i32 {
++            const GW_OWNER: u32 = 4;
++            let mut process = 0u32;
++            // SAFETY: `found` is the `&mut isize` handed to EnumWindows below, alive for the call.
++            unsafe {
++                GetWindowThreadProcessId(window, &raw mut process);
++                if process != std::process::id() || IsWindowVisible(window) == 0 || GetWindow(window, GW_OWNER) != 0 {
++                    return 1;
++                }
++                *(found as *mut isize) = window;
++            }
++            0
++        }
++        let mut found: isize = 0;
++        // SAFETY: the callback only writes through the pointer to `found`, which outlives the call.
++        unsafe {
++            EnumWindows(each, &raw mut found as isize);
++        }
++        (found != 0).then_some(found as i64)
++    }
++
++    /// Hides MW2's window, or shows it in front.
++    #[cfg(windows)]
++    pub(super) fn show(window: i64, shown: bool) {
++        const SW_HIDE: i32 = 0;
++        const SW_SHOW: i32 = 5;
++        // SAFETY: plain user32 calls on a window handle; a stale handle only makes them fail.
++        unsafe {
++            ShowWindow(window as isize, if shown { SW_SHOW } else { SW_HIDE });
++            if shown {
++                SetForegroundWindow(window as isize);
++            }
++        }
++    }
++
++    #[cfg(not(windows))]
++    pub(super) fn own() -> Option<i64> {
++        None
++    }
++
++    #[cfg(not(windows))]
++    pub(super) fn show(_window: i64, _shown: bool) {}
++}
++
++/// Where MW2's window stands in the one-application flow (M12).
++#[derive(Default)]
++pub(crate) struct OneWindow {
++    /// Seconds until the next look for our window.
++    look_in: f32,
++    /// Whether this connection's RimWorld has been told our window.
++    told: bool,
++    hidden: bool,
++}
++
++/// Whether MW2's window hides while no colonist is controlled: on unless
++/// `RWMW2_ONE_WINDOW=0`.
++fn one_window_on() -> bool {
++    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
++    *ON.get_or_init(|| {
++        let on = !matches!(std::env::var("RWMW2_ONE_WINDOW").map(|v| v.trim().to_lowercase()).as_deref(), Ok("0" | "off" | "false"));
++        println!("[rimworld] one window (MW2 hides until a colonist is controlled): {on}");
++        on
++    })
++}
++
++/// M12, one application: the game is played in RimWorld, and MW2's window only shows while
++/// RimWorld's "Control in MW2" hands it a colonist; letting the colonist go hides it again.
++/// RimWorld is told our window in our `hello`, or as soon as we find it.
++pub(crate) fn one_window(
++    floor: Res<FlatFloor>,
++    time: Res<Time>,
++    link: Option<Res<RimworldLink>>,
++    outbox: Option<Res<RimworldOutbox>>,
++    mut state: Local<OneWindow>,
++) {
++    use std::sync::atomic::Ordering;
++    let connected = link.as_deref().is_some_and(|link| link.connected);
++    let mut window = rimworld_bridge::OWN_WINDOW.load(Ordering::Relaxed);
++    if window == 0 {
++        state.look_in -= time.delta_secs();
++        if state.look_in <= 0.0 {
++            state.look_in = 1.0;
++            if let Some(found) = window::own() {
++                window = found;
++                rimworld_bridge::OWN_WINDOW.store(found, Ordering::Relaxed);
++            }
++        }
++    }
++    if !connected {
++        state.told = false;
++    } else if window != 0 && !state.told {
++        // Again, in case RimWorld said hello before we had a window.
++        if let Some(outbox) = outbox.as_deref()
++            && outbox.send(&rimworld_bridge::hello())
++        {
++            state.told = true;
++        }
++    }
++    if window == 0 {
++        return;
++    }
++    let hide = one_window_on()
++        && floor.active
++        && link.as_deref().is_some_and(|link| link.connected && link.snapshots > 0 && link.player_pawn.is_none());
++    if hide != state.hidden {
++        state.hidden = hide;
++        window::show(window, !hide);
++        println!("[rimworld] {}", if hide { "MW2 hides until a colonist is controlled in RimWorld" } else { "MW2 is back: controlling a colonist" });
++    }
+ }
+ 
+ /// Size of a cell in map units: for tests.
+diff --git a/crates/sim/src/carrier.rs b/crates/sim/src/carrier.rs
+index 9ada8c6..e51e5cf 100644
+--- a/crates/sim/src/carrier.rs
++++ b/crates/sim/src/carrier.rs
+@@ -302,6 +302,21 @@ impl SimWorld {
+         true
+     }
+ 
++    /// Lets the player sprint for as long as they like (the Marathon perk), or not. Whether
++    /// anything changed.
++    pub fn set_unlimited_sprint(&mut self, id: ClientId, on: bool) -> bool {
++        let mut frame = self.frame();
++        let Some(ps) = frame.player_mut(id) else {
++            return false;
++        };
++        let has = ps.perks[0] & movement_iw4::PERK_MARATHON != 0;
++        if has == on {
++            return false;
++        }
++        crate::script_player::set_perk(&mut frame, id, "specialty_marathon", on);
++        true
++    }
++
+     pub fn set_viewangles(&mut self, id: ClientId, viewangles: [f32; 3]) -> bool {
+         self.frame().set_viewangles(id, viewangles)
+     }
+diff --git a/crates/ui/menus/rimworld.json b/crates/ui/menus/rimworld.json
+new file mode 100644
+index 0000000..0e9ca37
+--- /dev/null
++++ b/crates/ui/menus/rimworld.json
+@@ -0,0 +1,213 @@
++[
++  {
++    "name": "rimworld_pause",
++    "fullscreen": 0,
++    "rect": {
++      "x": 0,
++      "y": 0,
++      "w": 640,
++      "h": 480,
++      "horz_align": 4,
++      "vert_align": 4
++    },
++    "handlers": {
++      "open": [
++        {
++          "Script": " focusFirst;"
++        }
++      ],
++      "esc": [
++        {
++          "Script": "close self;"
++        }
++      ]
++    },
++    "items": [
++      {
++        "name": "shade",
++        "background": "white",
++        "rect": {
++          "x": 0,
++          "y": 0,
++          "w": 640,
++          "h": 480,
++          "horz_align": 4,
++          "vert_align": 4
++        },
++        "fore_color": [
++          0,
++          0,
++          0,
++          0.55
++        ],
++        "static_flags": 1048576
++      },
++      {
++        "name": "resume",
++        "item_type": 1,
++        "style": 1,
++        "text_key": "RESUME",
++        "rect": {
++          "x": -64,
++          "y": 28,
++          "w": 336,
++          "h": 20,
++          "horz_align": 1,
++          "vert_align": 1
++        },
++        "background": "menu_button_selection_bar",
++        "fore_color": [
++          1,
++          1,
++          1,
++          1
++        ],
++        "back_color": [
++          0,
++          0,
++          0,
++          0
++        ],
++        "font_enum": 3,
++        "text_scale": 0.375,
++        "text_align_mode": 8,
++        "text_align_x": 68,
++        "text_align_y": 0,
++        "handlers": {
++          "action": [
++            {
++              "Script": "play mouse_click; close self;"
++            }
++          ],
++          "focus": [
++            {
++              "Script": "play mouse_over; setItemColor self backcolor 0 0 0 1;"
++            }
++          ],
++          "leave_focus": [
++            {
++              "Script": "setItemColor self backcolor 0 0 0 0;"
++            }
++          ]
++        }
++      },
++      {
++        "name": "options",
++        "item_type": 1,
++        "style": 1,
++        "text_key": "OPTIONS",
++        "rect": {
++          "x": -64,
++          "y": 48,
++          "w": 336,
++          "h": 20,
++          "horz_align": 1,
++          "vert_align": 1
++        },
++        "background": "menu_button_selection_bar",
++        "fore_color": [
++          1,
++          1,
++          1,
++          1
++        ],
++        "back_color": [
++          0,
++          0,
++          0,
++          0
++        ],
++        "font_enum": 3,
++        "text_scale": 0.375,
++        "text_align_mode": 8,
++        "text_align_x": 68,
++        "text_align_y": 0,
++        "handlers": {
++          "action": [
++            {
++              "Script": "play mouse_click; open pc_options_video;"
++            }
++          ],
++          "focus": [
++            {
++              "Script": "play mouse_over; setItemColor self backcolor 0 0 0 1;"
++            }
++          ],
++          "leave_focus": [
++            {
++              "Script": "setItemColor self backcolor 0 0 0 0;"
++            }
++          ]
++        }
++      },
++      {
++        "name": "exit_separator",
++        "background": "white",
++        "rect": {
++          "x": 4,
++          "y": 75,
++          "w": 248,
++          "h": 0.5,
++          "horz_align": 1,
++          "vert_align": 1
++        },
++        "fore_color": [
++          1,
++          1,
++          1,
++          0.25
++        ],
++        "static_flags": 1048576
++      },
++      {
++        "name": "quit",
++        "item_type": 1,
++        "style": 1,
++        "text_key": "QUIT",
++        "rect": {
++          "x": -64,
++          "y": 84,
++          "w": 336,
++          "h": 20,
++          "horz_align": 1,
++          "vert_align": 1
++        },
++        "background": "menu_button_selection_bar",
++        "fore_color": [
++          1,
++          1,
++          1,
++          1
++        ],
++        "back_color": [
++          0,
++          0,
++          0,
++          0
++        ],
++        "font_enum": 3,
++        "text_scale": 0.375,
++        "text_align_mode": 8,
++        "text_align_x": 68,
++        "text_align_y": 0,
++        "handlers": {
++          "action": [
++            {
++              "Script": "play mouse_click; open quit_popmenu;"
++            }
++          ],
++          "focus": [
++            {
++              "Script": "play mouse_over; setItemColor self backcolor 0 0 0 1;"
++            }
++          ],
++          "leave_focus": [
++            {
++              "Script": "setItemColor self backcolor 0 0 0 0;"
++            }
++          ]
++        }
++      }
++    ]
++  }
++]
+diff --git a/crates/ui/src/menu.rs b/crates/ui/src/menu.rs
+index 649fd9b..bf0b003 100644
+--- a/crates/ui/src/menu.rs
++++ b/crates/ui/src/menu.rs
+@@ -57,6 +57,8 @@ pub fn install_frontend_menus(catalog: &mut asset_game::MenuCatalog) -> Result<(
+     catalog.load_definitions(include_str!("../menus/classes.json"))?;
+     catalog.load_definitions(include_str!("../menus/settings.json"))?;
+     catalog.load_definitions(include_str!("../menus/controller.json"))?;
++    // RimWorld x MW2 (M12): the Escape menu on RimWorld's map.
++    catalog.load_definitions(include_str!("../menus/rimworld.json"))?;
+     let has_controller_page = catalog.get("options_controller").is_some();
+     for (name, menu) in &mut catalog.menus {
+         if matches!(name.as_str(), "popup_endgame" | "popup_endgame_ranked") {
+@@ -156,3 +158,15 @@ pub fn install_frontend_menus(catalog: &mut asset_game::MenuCatalog) -> Result<(
+     }
+     Ok(())
+ }
++
++#[cfg(test)]
++mod tests {
++    #[test]
++    fn rimworlds_escape_menu_loads_with_its_three_buttons() {
++        let mut catalog = asset_game::MenuCatalog::default();
++        catalog.load_definitions(include_str!("../menus/rimworld.json")).unwrap();
++        let menu = catalog.get("rimworld_pause").expect("rimworld_pause");
++        let buttons: Vec<&str> = menu.items.iter().filter(|item| item.item_type == 1).map(|item| item.name.as_str()).collect();
++        assert_eq!(buttons, ["resume", "options", "quit"]);
++    }
++}

@@ -1,0 +1,182 @@
+diff --git a/crates/assets/src/lane/iw4.rs b/crates/assets/src/lane/iw4.rs
+index d97cf4a..ab5e7f2 100644
+--- a/crates/assets/src/lane/iw4.rs
++++ b/crates/assets/src/lane/iw4.rs
+@@ -150,6 +150,7 @@ impl ZoneLane for Iw4Lane {
+         let light_def_table = sink.light_def_table;
+         let light_def_bodies = sink.light_def_bodies;
+         let mut materials = std::mem::take(&mut sink.materials);
++        crate::minecraft_map::set_lazy_materials_from(u32::MAX);
+         if crate::minecraft_map::flat_load() {
+             absorb_other_map_models(
+                 path,
+@@ -1240,10 +1241,90 @@ fn push_mapents_key_census(report: &mut Vec<String>, stream: &fastfile_iw4::Zone
+     }
+ }
+ 
++/// Names of the other maps' models the RimWorld floor takes, by part of the
++/// name: plants, cover and furniture RimWorld things are drawn with.
++/// `RWMW2_EXTRA_MODELS` adds more, comma separated; `*` takes every model.
++const WANTED_MODELS: &[&str] = &[
++    "foliage", "tree", "palm", "cact", "bush", "shrub", "sandbag", "barrier", "crate", "barrel",
++    "chair", "table", "bed", "couch", "sofa", "shelf", "lamp", "fence",
++];
++
++/// The parts of names [`absorb_other_map_models`] takes; empty for every model.
++fn wanted_models() -> Vec<String> {
++    let extra = std::env::var("RWMW2_EXTRA_MODELS").unwrap_or_else(|_| String::new());
++    let extra: Vec<String> =
++        extra.split(',').map(|part| part.trim().to_ascii_lowercase()).filter(|part| !part.is_empty()).collect();
++    if extra.iter().any(|part| part == "*") {
++        return Vec::new();
++    }
++    WANTED_MODELS.iter().map(|part| (*part).to_owned()).chain(extra).collect()
++}
++
++/// Keeps only the `wanted` models (all when it is empty) and the materials and
++/// images they use. Returns the old material index to the new one.
++fn keep_wanted(
++    scenes: &mut asset_world::MapXModelSceneCatalog,
++    materials: &mut asset_material::MaterialCatalog,
++    wanted: &[String],
++) -> Vec<usize> {
++    if !wanted.is_empty() {
++        let names: std::collections::BTreeSet<String> = scenes
++            .iter()
++            .map(|(key, _)| key.0.clone())
++            .filter(|name| {
++                let name = name.to_ascii_lowercase();
++                wanted.iter().any(|part| name.contains(part.as_str()))
++            })
++            .collect();
++        scenes.retain_names(&names);
++    }
++    let mut used = vec![false; materials.materials.len()];
++    for (_, asset) in scenes.iter() {
++        if let asset_world::MapXModelSceneAsset::Iw4(skel) = asset {
++            for slot in skel.surface_materials.iter().flatten() {
++                if let Some(flag) = used.get_mut(slot.get()) {
++                    *flag = true;
++                }
++            }
++        }
++    }
++    let mut old_to_new = vec![0; used.len()];
++    let kept: Vec<_> = std::mem::take(&mut materials.materials)
++        .into_iter()
++        .enumerate()
++        .filter(|(index, _)| used[*index])
++        .enumerate()
++        .map(|(new, (old, material))| {
++            old_to_new[old] = new;
++            material
++        })
++        .collect();
++    materials.materials = kept;
++    // Only the images those materials use, so only theirs are decoded.
++    let mut image_new = vec![None; materials.images.len()];
++    let mut images = Vec::new();
++    let all_images = std::mem::take(&mut materials.images);
++    let mut all_images: Vec<Option<_>> = all_images.into_iter().map(Some).collect();
++    for material in &mut materials.materials {
++        for texture in &mut material.textures {
++            texture.image = texture.image.and_then(|old| {
++                if image_new[old].is_none() {
++                    image_new[old] = Some(images.len());
++                    images.push(all_images.get_mut(old)?.take()?);
++                }
++                image_new[old]
++            });
++        }
++    }
++    materials.images = images;
++    old_to_new
++}
++
+ /// RimWorld floor: the models and materials of every other MW2 multiplayer
+-/// map, so RimWorld things can be drawn with any of them, not only the
+-/// stand-in map's. The stand-in's own stay as they are. Their color maps are
+-/// decoded with the map's. `RWMW2_ALL_MAPS=0` turns this off.
++/// map that RimWorld things can be drawn with ([`WANTED_MODELS`]), not only
++/// the stand-in map's. The stand-in's own stay as they are. Their color maps
++/// are decoded with the map's; their shader pipelines are built when first
++/// drawn. `RWMW2_ALL_MAPS=0` turns this off.
+ fn absorb_other_map_models(
+     path: &Path,
+     progress: &LoadProgress,
+@@ -1256,7 +1337,9 @@ fn absorb_other_map_models(
+         return;
+     }
+     let zones = other_map_zones(path);
++    let wanted = wanted_models();
+     let before = map_xmodels.scene_asset_count();
++    let first_lazy = materials.materials.len();
+     let stage = progress.begin_scoped(StageId::MapAssets, "other maps", Some(zones.len() as u64));
+     let mut walked = 0;
+     for (n, zone) in zones.iter().enumerate() {
+@@ -1291,15 +1374,21 @@ fn absorb_other_map_models(
+             );
+         }
+         let mut scenes = sink.map_xmodels.take_scene_assets();
+-        let linked = materials.absorb_asset_population(std::mem::take(&mut sink.materials));
+-        scenes.remap_walk_materials(&linked);
++        let mut donor = std::mem::take(&mut sink.materials);
++        let old_to_new = keep_wanted(&mut scenes, &mut donor, &wanted);
++        let linked = materials.absorb_asset_population(donor);
++        let old_to_host: Vec<usize> =
++            old_to_new.iter().map(|&new| linked.get(new).copied().unwrap_or(0)).collect();
++        scenes.remap_walk_materials(&old_to_host);
+         map_xmodels.absorb_scene_assets(scenes);
+         walked += 1;
+     }
+     stage.done();
++    crate::minecraft_map::set_lazy_materials_from(u32::try_from(first_lazy).unwrap_or(u32::MAX));
+     let line = format!(
+-        "rimworld: added {} models from {walked} other maps ({} materials in all)",
++        "rimworld: added {} models from {walked} other maps, {} new materials built when first drawn ({} in all)",
+         map_xmodels.scene_asset_count().saturating_sub(before),
++        materials.materials.len().saturating_sub(first_lazy),
+         materials.materials.len()
+     );
+     diag::info!(World, "{line}");
+diff --git a/crates/assets/src/minecraft_map.rs b/crates/assets/src/minecraft_map.rs
+index 0b0c544..4acace5 100644
+--- a/crates/assets/src/minecraft_map.rs
++++ b/crates/assets/src/minecraft_map.rs
+@@ -40,6 +40,20 @@ pub fn flat_load() -> bool {
+     FLAT_LOAD.load(std::sync::atomic::Ordering::Relaxed)
+ }
+ 
++/// The first material id taken from the other MW2 maps on the RimWorld floor:
++/// those get their shader pipelines when first drawn, not while the map loads.
++/// `u32::MAX` when there are none.
++static LAZY_MATERIALS_FROM: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(u32::MAX);
++
++pub fn set_lazy_materials_from(first: u32) {
++    LAZY_MATERIALS_FROM.store(first, std::sync::atomic::Ordering::Relaxed);
++}
++
++/// Whether material `id` gets its pipelines only once something draws it.
++pub fn lazy_material(id: u16) -> bool {
++    u32::from(id) >= LAZY_MATERIALS_FROM.load(std::sync::atomic::Ordering::Relaxed)
++}
++
+ pub fn is_flat(zone: &str) -> bool {
+     zone.eq_ignore_ascii_case(FLAT_ZONE)
+ }
+diff --git a/crates/render_gpu/src/drawsurf/colour_submit/pipeline.rs b/crates/render_gpu/src/drawsurf/colour_submit/pipeline.rs
+index d5a89b3..9ea1b3a 100644
+--- a/crates/render_gpu/src/drawsurf/colour_submit/pipeline.rs
++++ b/crates/render_gpu/src/drawsurf/colour_submit/pipeline.rs
+@@ -231,6 +231,11 @@ fn schedule_admitted_pipelines(
+                     },
+                     state0.srgb_write,
+                 );
++                // The RimWorld floor's models from the other MW2 maps: built when
++                // first drawn, so loading does not wait for thousands of them.
++                if assets::minecraft_map::lazy_material(material.0) {
++                    continue;
++                }
+                 for port in prepared_pass.port.iter().flatten() {
+                     use asset_iw4::vertex_decl::{
+                         PACKED_VERTEX_TYPE, STATICMODELCACHE_VERTEX_TYPE,

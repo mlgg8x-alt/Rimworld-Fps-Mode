@@ -1,0 +1,655 @@
+diff --git a/crates/rimworld_bridge/src/lib.rs b/crates/rimworld_bridge/src/lib.rs
+index d2813c2..8beb86b 100644
+--- a/crates/rimworld_bridge/src/lib.rs
++++ b/crates/rimworld_bridge/src/lib.rs
+@@ -16,7 +16,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
+ 
+ use bevy::prelude::*;
+ use rwmw2_protocol::{DEFAULT_ADDR, Message, PROTOCOL_VERSION, Side};
+-pub use rwmw2_protocol::{BuildingState, Carried, DoorState, FireState, GasPatch, GunTiming, PlantKindArt, ItemState, LookState, LootItem, LootKind, LootSource, Message as BridgeMessage, PawnState, PlantState, ShotResult, GAS_PATCH, Stance, WearState, roof, terrain};
++pub use rwmw2_protocol::{BuildingState, Carried, DoorState, FilthState, FireState, FleckState, GasPatch, GunTiming, PlantKindArt, ItemState, LookState, LootItem, LootKind, LootSource, Message as BridgeMessage, PawnState, PlantState, ShotResult, GAS_PATCH, Stance, WearState, roof, terrain};
+ 
+ pub struct RimworldBridgePlugin;
+ 
+@@ -47,6 +47,9 @@ impl Plugin for RimworldBridgePlugin {
+     }
+ }
+ 
++/// Most flecks kept waiting for a game system (M21).
++const MAX_FLECKS: usize = 512;
++
+ /// What the engine currently knows about the connected RimWorld game.
+ #[derive(Resource, Debug, Default, Clone)]
+ pub struct RimworldLink {
+@@ -137,12 +140,33 @@ pub struct RimworldLink {
+     /// and `gas` (M20).
+     pub fires: Option<Arc<Vec<FireState>>>,
+     pub gas: Option<Arc<Vec<GasPatch>>>,
++    /// The weather, from the latest `weather` (M21): rain, snow, fog, wind.
++    pub weather: Option<Weather>,
++    /// Every bit of filth, from the latest `filth` (M21).
++    pub filth: Option<Arc<Vec<FilthState>>>,
++    /// Flecks RimWorld made since a game system last took them (M21).
++    pub flecks: Vec<FleckState>,
++}
++
++/// The weather on the map in view (M21): RimWorld's rain and snow rates, fog 0..1, wind.
++#[derive(Debug, Clone, Copy, PartialEq, Default)]
++pub struct Weather {
++    pub rain: f32,
++    pub snow: f32,
++    pub fog: f32,
++    pub wind: f32,
+ }
+ 
+ /// MW2's own window (a Windows handle), once the engine has found it: its `hello` tells
+ /// RimWorld, whose "Control in MW2" brings it up (M12+). 0 until then.
+ pub static OWN_WINDOW: AtomicI64 = AtomicI64::new(0);
+ 
++/// M21: whether RimWorld is connected now, and its window from its latest `hello`, kept by
++/// the connection's own thread: they stay true while the game loop stalls (a hidden window
++/// gets no frames), so a watchdog can tell when RimWorld has gone.
++pub static CONNECTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
++pub static RIMWORLD_WINDOW: AtomicI64 = AtomicI64::new(0);
++
+ /// Our `hello`, with MW2's window when it is known.
+ pub fn hello() -> Message {
+     let window = OWN_WINDOW.load(Ordering::Relaxed);
+@@ -445,9 +469,11 @@ fn accept_loop(listener: TcpListener, tx: Sender<BridgeEvent>, outbox: RimworldO
+     // One RimWorld at a time; the next connection is accepted when this one closes.
+     for stream in listener.incoming() {
+         let Ok(stream) = stream else { continue };
++        CONNECTED.store(true, Ordering::Relaxed);
+         if let Err(error) = serve(stream, &tx, &outbox) {
+             report(&format!("connection ended: {error}"));
+         }
++        CONNECTED.store(false, Ordering::Relaxed);
+         outbox.set(None);
+         if tx.send(BridgeEvent::Disconnected).is_err() {
+             return; // app shut down
+@@ -464,8 +490,13 @@ fn serve(stream: TcpStream, tx: &Sender<BridgeEvent>, outbox: &RimworldOutbox) -
+         let line = line?;
+         match Message::from_line(&line) {
+             Ok(message) => {
+-                if matches!(message, Message::Hello { .. }) && !outbox.send(&hello()) {
+-                    return Err(std::io::Error::other("could not answer hello"));
++                if let Message::Hello { window, .. } = &message {
++                    if let Some(window) = window.as_deref().and_then(|w| w.parse::<i64>().ok()).filter(|&w| w != 0) {
++                        RIMWORLD_WINDOW.store(window, Ordering::Relaxed);
++                    }
++                    if !outbox.send(&hello()) {
++                        return Err(std::io::Error::other("could not answer hello"));
++                    }
+                 }
+                 if tx.send(BridgeEvent::Received(message)).is_err() {
+                     return Ok(());
+@@ -557,6 +588,23 @@ fn drain_inbox(inbox: Res<RimworldInbox>, mut link: ResMut<RimworldLink>) {
+                 }
+                 link.fires = Some(Arc::new(fires));
+             }
++            BridgeEvent::Received(Message::Weather { rain, snow, fog, wind }) => {
++                let weather = Weather { rain, snow, fog, wind };
++                if link.weather != Some(weather) {
++                    report(&format!("weather: rain {rain:.1}, snow {snow:.1}, fog {fog:.1}"));
++                }
++                link.weather = Some(weather);
++            }
++            BridgeEvent::Received(Message::Filth { filth }) => {
++                if link.filth.is_none() && !filth.is_empty() {
++                    report(&format!("filth: {}", filth.len()));
++                }
++                link.filth = Some(Arc::new(filth));
++            }
++            BridgeEvent::Received(Message::Flecks { flecks }) => {
++                let room = MAX_FLECKS.saturating_sub(link.flecks.len());
++                link.flecks.extend(flecks.into_iter().take(room));
++            }
+             BridgeEvent::Received(Message::Gas { gas }) => {
+                 if link.gas.is_none() && !gas.is_empty() {
+                     report(&format!("gas: {} patches", gas.len()));
+diff --git a/crates/rimworld_world/src/lib.rs b/crates/rimworld_world/src/lib.rs
+index f36f986..fed8974 100644
+--- a/crates/rimworld_world/src/lib.rs
++++ b/crates/rimworld_world/src/lib.rs
+@@ -536,6 +536,10 @@ pub struct FlatFloor {
+     booms: Vec<Boom>,
+     /// MW2 effects for RimWorld's this frame (M20): bullets striking, muzzle flashes, blasts.
+     effects: Vec<frame::RimFxShot>,
++    /// RimWorld's flecks alive now, and seconds of weather so far, for rain and snow to fall
++    /// by (M21).
++    flecks: Vec<FleckLive>,
++    weather_time: f32,
+     /// Seconds since the player was last handed their colonist's gun, and the RimWorld gun
+     /// last reported.
+     since_arm: f32,
+@@ -909,6 +913,12 @@ fn update(
+     // RimWorld's bullets since last frame; taken even while the floor is down, so none pile up.
+     let shots = link.as_deref_mut().map(|link| std::mem::take(&mut link.shots)).unwrap_or_default();
+     let shells = link.as_deref_mut().map(|link| std::mem::take(&mut link.shells)).unwrap_or_default();
++    // M21: RimWorld's flecks, living on at the game's speed (still while it is paused).
++    let flecks = link.as_deref_mut().map_or_else(Vec::new, |link| std::mem::take(&mut link.flecks));
++    let game_rate = link.as_deref().map_or(1.0, |link| if link.paused { 0.0 } else { link.rate.unwrap_or(1.0) });
++    floor.flecks.extend(flecks.into_iter().map(|fleck| FleckLive { fleck, age: 0.0 }));
++    age_flecks(&mut floor.flecks, time.delta_secs() * game_rate);
++    floor.weather_time += time.delta_secs();
+     let blasts = link.as_deref_mut().map(|link| std::mem::take(&mut link.explosions)).unwrap_or_default();
+     // RimWorld's map size, while it is connected.
+     let wanted = link
+@@ -1250,6 +1260,13 @@ fn update(
+         },
+         size,
+     );
++    // M21: what is see-through: filth on the ground, flecks, rain and snow.
++    let weather = link.as_deref().and_then(|link| link.weather).unwrap_or(CLEAR_WEATHER);
++    view.entity_meshes[2] = effect_mesh(
++        &floor,
++        link.as_deref().and_then(|link| link.filth.as_deref()).map_or(&[][..], Vec::as_slice),
++        weather,
++    );
+ 
+     let Some(ps) = presented.player(local.0) else {
+         return;
+@@ -1268,7 +1285,8 @@ fn update(
+         .single()
+         .map(|w| w.width() / w.height().max(1.0))
+         .unwrap_or(16.0 / 9.0);
+-    view.environment = environment(eye, forward, aspect, floor.blocks() as f32);
++    let weather = link.as_deref().and_then(|link| link.weather).unwrap_or(CLEAR_WEATHER);
++    view.environment = environment(eye, forward, aspect, floor.blocks() as f32, weather);
+     view.eye_light = [15.0, 0.0];
+ }
+ 
+@@ -3911,20 +3929,25 @@ fn celestial() -> RgbaImage {
+ 
+ /// MinecraftOSS's environment uniform for a clear, still noon, laid out as
+ /// the Minecraft world's update lays it out.
+-fn environment(eye: [f64; 3], forward: Vec3, aspect: f32, size: f32) -> [[f32; 4]; 16] {
++fn environment(eye: [f64; 3], forward: Vec3, aspect: f32, size: f32, weather: rimworld_bridge::Weather) -> [[f32; 4]; 16] {
+     let right = forward.cross(Vec3::Y).normalize_or(Vec3::X);
+     let up = right.cross(forward).normalize_or(Vec3::Y);
+     let put = |v: Vec3| [v.x, v.y, v.z, 0.0];
+-    // Fog only past the far side of the floor seen from its edge.
+-    let fog_end = size * 1.6;
++    // Fog only past the far side of the floor seen from its edge; nearer in RimWorld's fog,
++    // rain and snow (M21).
++    let (fog_end, murk) = murk(size * 1.6, weather);
++    let fog_start = fog_end * (0.6 - 0.55 * murk);
++    let grey = |clear: [f32; 3], dull: f32| clear.map(|c| c + (dull - c) * murk);
++    let sky = grey([0.47, 0.65, 1.0], 0.55);
++    let fog = grey([0.75, 0.85, 1.0], 0.68);
+     let sun = Vec3::new(0.3, 1.0, 0.2).normalize();
+     [
+         put(forward),
+         put(right),
+         put(up),
+         [eye[0] as f32, eye[1] as f32, eye[2] as f32, 0.0],
+-        [0.47, 0.65, 1.0, 0.0],
+-        [0.75, 0.85, 1.0, fog_end],
++        [sky[0], sky[1], sky[2], 0.0],
++        [fog[0], fog[1], fog[2], fog_end],
+         [1.0, 1.0, 1.0, 1.0],
+         [0.0, 0.0, 0.0, 0.0],
+         [sun.x, sun.y, sun.z, 1.0],
+@@ -3932,12 +3955,28 @@ fn environment(eye: [f64; 3], forward: Vec3, aspect: f32, size: f32) -> [[f32; 4
+         [1.0, 1.0, 1.0, 0.5],
+         [aspect, 0.0, 0.0, 0.0],
+         [0.0, 0.0, 96.0, 160.0],
+-        [fog_end * 0.6, fog_end, fog_end * 0.9, fog_end],
++        [fog_start, fog_end, fog_start * 1.5, fog_end],
+         [0.05, 0.05, 0.05, 0.0],
+         [1.0, 0.9, 0.8, 1.0],
+     ]
+ }
+ 
++/// No rain, snow, fog or wind: before RimWorld says otherwise.
++const CLEAR_WEATHER: rimworld_bridge::Weather = rimworld_bridge::Weather { rain: 0.0, snow: 0.0, fog: 0.0, wind: 0.0 };
++
++/// Blocks one sees in RimWorld's fog, and in its heaviest rain or snow.
++const FOG_SIGHT: f32 = 24.0 * CELL as f32;
++const RAIN_SIGHT: f32 = 70.0 * CELL as f32;
++
++/// How far one sees in `weather` with `clear` blocks of sight on a clear day, and how murky
++/// it is, 0 clear to 1 thick fog.
++fn murk(clear: f32, weather: rimworld_bridge::Weather) -> (f32, f32) {
++    let fog = weather.fog.clamp(0.0, 1.0);
++    let wet = (weather.rain.max(weather.snow) / 1.5).clamp(0.0, 1.0);
++    let sight = clear.min(clear + (FOG_SIGHT - clear) * fog).min(clear + (RAIN_SIGHT.min(clear) - clear) * wet);
++    (sight.max(4.0), fog.max(wet * 0.6))
++}
++
+ /// MW2's animations a soldier plays, by name: the first the map has of each list, else the
+ /// first whose name has all of the words.
+ const STAND_CLIPS: (&[&str], &[&str]) = (&["pb_stand_alert", "pb_stand_alert_pistol", "pb_stand_idle"], &["pb_stand"]);
+@@ -4610,6 +4649,171 @@ fn present_booms(
+     }
+ }
+ 
++/// A RimWorld fleck as it lives on in MW2 (M21): as it started, and how old it is in game
++/// seconds.
++#[derive(Clone, Debug, PartialEq)]
++struct FleckLive {
++    fleck: rimworld_bridge::FleckState,
++    age: f32,
++}
++
++impl FleckLive {
++    fn life(&self) -> f32 {
++        let f = &self.fleck;
++        f.fade_in.max(0.0) + f.solid.max(0.0) + f.fade_out.max(0.0)
++    }
++
++    /// How much of it shows now, 0 to 1: fading in, solid, fading out.
++    fn shown(&self) -> f32 {
++        let f = &self.fleck;
++        if self.age < f.fade_in {
++            return self.age / f.fade_in.max(1e-3);
++        }
++        let out = self.age - f.fade_in.max(0.0) - f.solid.max(0.0);
++        if out > 0.0 { 1.0 - out / f.fade_out.max(1e-3) } else { 1.0 }.clamp(0.0, 1.0)
++    }
++}
++
++/// Most flecks alive at once (M21); the oldest go first.
++const MAX_FLECKS: usize = 600;
++
++/// Ages every fleck `dt` game seconds and drops those whose time is up.
++fn age_flecks(flecks: &mut Vec<FleckLive>, dt: f32) {
++    for fleck in flecks.iter_mut() {
++        fleck.age += dt;
++    }
++    flecks.retain(|fleck| fleck.age < fleck.life());
++    if flecks.len() > MAX_FLECKS {
++        let extra = flecks.len() - MAX_FLECKS;
++        flecks.drain(..extra);
++    }
++}
++
++/// Filth further than this from the eye is not drawn, nor more than so many (M21).
++const FILTH_REACH: f32 = 60.0 * CELL as f32;
++const MAX_FILTH: usize = 1200;
++/// Rain and snow fall this far around the eye, from this high above the ground, in blocks.
++const WEATHER_REACH: f32 = 26.0;
++const WEATHER_TOP: f32 = 22.0;
++/// Drops at RimWorld's rain rate 1 and flakes at its snow rate 1.
++const RAIN_DROPS: f32 = 700.0;
++const SNOW_FLAKES: f32 = 600.0;
++/// Blocks a second rain and snow fall.
++const RAIN_SPEED: f32 = 24.0;
++const SNOW_SPEED: f32 = 2.2;
++
++/// The see-through things on the floor (M21): RimWorld's filth lying where it lies, its
++/// flecks flying, growing and fading, and its rain and snow falling where no roof keeps them
++/// off, as MinecraftOSS translucent entity vertices and indices.
++fn effect_mesh(floor: &FlatFloor, filth: &[rimworld_bridge::FilthState], weather: rimworld_bridge::Weather) -> (Vec<u8>, Vec<u32>) {
++    let (mut vertices, mut indices) = (Vec::new(), Vec::new());
++    let size = floor.size;
++    let eye = floor.eye.map(|eye| Vec3::new(eye[0] as f32, eye[1] as f32, eye[2] as f32));
++    let cell = CELL as f32;
++    // Filth, flat on the ground, the nearest first.
++    let mut near: Vec<(f32, &rimworld_bridge::FilthState, Vec3)> = filth
++        .iter()
++        .map(|splotch| {
++            let at = rimworld_block(size, splotch.x, 0.0, splotch.z);
++            (eye.map_or(0.0, |eye| Vec2::new(eye.x - at.x, eye.z - at.z).length()), splotch, at)
++        })
++        .filter(|(distance, ..)| *distance <= FILTH_REACH)
++        .collect();
++    near.sort_by(|a, b| a.0.total_cmp(&b.0));
++    for (_, splotch, at) in near.into_iter().take(MAX_FILTH) {
++        let Some((tex, bounds)) = u16::try_from(splotch.tex).ok().and_then(|tex| Some((tex, *floor.cutouts.get(&tex)?))) else {
++            continue;
++        };
++        let across = splotch.size.clamp(0.1, 6.0) * cell;
++        let (w, h) = ((bounds[2] - bounds[0]) * across, (bounds[3] - bounds[1]) * across);
++        add_card(&mut vertices, &mut indices, [at.x, at.z], None, tex, bounds, [w, h], false, Some(splotch.rot), 0.01, WHITE);
++    }
++    // Flecks.
++    let eye_xz = eye.map(|eye| [f64::from(eye.x), f64::from(eye.y), f64::from(eye.z)]);
++    for live in &floor.flecks {
++        let f = &live.fleck;
++        let Some((tex, bounds)) = u16::try_from(f.tex).ok().and_then(|tex| Some((tex, *floor.cutouts.get(&tex)?))) else {
++            continue;
++        };
++        let t = live.age;
++        let at = rimworld_block(size, f.x + f.vx * t, 0.0, f.z + f.vz * t);
++        let across = (f.size + f.grow * t).clamp(0.02, 12.0) * cell;
++        let (w, h) = ((bounds[2] - bounds[0]) * across, (bounds[3] - bounds[1]) * across);
++        let colour = [f.color[0], f.color[1], f.color[2], f.color[3] * live.shown()];
++        if f.flat {
++            add_card(&mut vertices, &mut indices, [at.x, at.z], None, tex, bounds, [w, h], false, Some(f.rot + f.spin * t), 0.03, colour);
++        } else {
++            let lift = ((f.y + f.vy * t) * cell - h / 2.0).max(0.0);
++            add_card(&mut vertices, &mut indices, [at.x, at.z], eye_xz, tex, bounds, [w, h], false, None, lift, colour);
++        }
++    }
++    if let Some(eye) = eye {
++        add_weather(&mut vertices, &mut indices, floor.lay(), eye, weather, floor.weather_time);
++    }
++    (bytemuck::cast_slice(&vertices).to_vec(), indices)
++}
++
++/// A number from 0 to 1 that `i` and `salt` always give.
++fn scatter(i: u32, salt: u32) -> f32 {
++    let mut h = i.wrapping_mul(0x9E37_79B9) ^ salt.wrapping_mul(0x85EB_CA6B);
++    h ^= h >> 15;
++    h = h.wrapping_mul(0x2C1B_3C6D);
++    h ^= h >> 12;
++    h = h.wrapping_mul(0x297A_2D39);
++    h ^= h >> 15;
++    (h >> 8) as f32 / (1u32 << 24) as f32
++}
++
++/// Rain streaks and snowflakes around `eye` (block space) as RimWorld's `weather` has them,
++/// `t` seconds in: each stays put in the world as the eye moves (they wrap around it), and
++/// none falls where a roof or the mountain is overhead.
++fn add_weather(vertices: &mut Vec<Vertex>, indices: &mut Vec<u32>, lay: Lay<'_>, eye: Vec3, weather: rimworld_bridge::Weather, t: f32) {
++    let roofed = |p: Vec3| lay.detail.is_some_and(|detail| detail.roof_at(p.x.floor() as i32, p.z.floor() as i32) != roof::NONE);
++    let span = WEATHER_REACH * 2.0;
++    let place = |i: u32, salt: u32, fall: f32| {
++        let wrap = |v: f32, centre: f32| centre + (v - centre + WEATHER_REACH).rem_euclid(span) - WEATHER_REACH;
++        let x = wrap(scatter(i, salt) * span * 40.0, eye.x);
++        let z = wrap(scatter(i, salt + 1) * span * 40.0, eye.z);
++        let top = WEATHER_TOP.max(eye.y + 8.0);
++        let y = top - (t * fall + scatter(i, salt + 2) * top).rem_euclid(top);
++        Vec3::new(x, y, z)
++    };
++    let wind = weather.wind.clamp(0.0, 3.0);
++    let drops = (weather.rain.clamp(0.0, 2.5) * RAIN_DROPS) as u32;
++    let slant = Vec3::new(0.12 * wind, -1.0, 0.05 * wind).normalize();
++    for i in 0..drops {
++        let head = place(i, 11, RAIN_SPEED);
++        if roofed(head) {
++            continue;
++        }
++        let tail = head - slant * 0.9;
++        add_streak(vertices, indices, head, tail, 0.018, [0.72, 0.78, 0.88, 0.45], eye);
++    }
++    let flakes = (weather.snow.clamp(0.0, 2.5) * SNOW_FLAKES) as u32;
++    for i in 0..flakes {
++        let mut at = place(i, 29, SNOW_SPEED);
++        let sway = t * 0.9 + scatter(i, 31) * 6.3;
++        at.x += sway.sin() * 0.35 + wind * 0.4 * (t * 0.3 + scatter(i, 37)).fract();
++        at.z += sway.cos() * 0.25;
++        if roofed(at) {
++            continue;
++        }
++        add_streak(vertices, indices, at + Vec3::Y * 0.05, at - Vec3::Y * 0.05, 0.05, [1.0, 1.0, 1.0, 0.9], eye);
++    }
++}
++
++/// A flat strip from `a` to `b`, `half` wide each way, turned to face `eye`, plain `colour`.
++fn add_streak(vertices: &mut Vec<Vertex>, indices: &mut Vec<u32>, a: Vec3, b: Vec3, half: f32, colour: [f32; 4], eye: Vec3) {
++    let along = b - a;
++    let side = along.cross(eye - a).normalize_or(Vec3::X) * half;
++    let uv = tile_uv(TILE_WHITE, [0.0, 0.0], [0.5, 0.5]);
++    let base = vertices.len() as u32;
++    for p in [a - side, a + side, b + side, b - side] {
++        vertices.push(Vertex { position: p.to_array(), uv, color: colour, sky_light: 15.0, block_light: 0.0 });
++    }
++    indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
++}
++
+ /// M20: MW2's own effects for RimWorld's, each a list of names to try in turn (the game has
+ /// the effects of every map loaded, so not all of them).
+ mod fx_names {
+@@ -4623,6 +4827,7 @@ mod fx_names {
+     pub const SMOKE: &[&str] = &["smoke/battlefield_smokebank_s", "smoke/room_smoke_200", "smoke/hallway_smoke_light", "smoke/thin_light_smoke_l"];
+     pub const TOX: &[&str] = &["smoke/thin_light_smoke_l", "smoke/car_damage_whitesmoke", "smoke/battlefield_smokebank_s"];
+     pub const ROT: &[&str] = &["smoke/thin_light_smoke_m", "smoke/thin_light_smoke_l"];
++    pub const FOG: &[&str] = &["smoke/fog_ground_200", "smoke/ground_fog1200x1200_estate", "smoke/hallway_smoke_light", "smoke/room_smoke_200"];
+     pub const DUST: &[&str] = &["smoke/thin_black_smoke_l", "smoke/car_damage_blacksmoke", "smoke/battlefield_smokebank_s"];
+     pub const FLAME_BLAST: &[&str] = &["explosions/fire_vehicle_flame_up_medbig1", "props/barrelexp", "explosions/grenadeexp_default"];
+     pub const EMP_BLAST: &[&str] = &["explosions/emp_flash_mp", "explosions/electrical_transformer_sparks_a", "explosions/generator_sparks_a"];
+@@ -4689,6 +4894,11 @@ fn shot_effects(floor: &FlatFloor, fired: &[Tracer], dt: f32) -> Vec<frame::RimF
+ const MAX_FIRE_EFFECTS: usize = 32;
+ const MAX_GAS_EFFECTS: usize = 32;
+ const EFFECT_REACH: f32 = 80.0 * CELL as f32;
++/// Fog this thick lays MW2's ground fog around the eye, in a grid this many cells apart, this
++/// many steps out each way, on unroofed cells only.
++const FOG_FX_FROM: f32 = 0.3;
++const FOG_FX_STEP: i32 = 12;
++const FOG_FX_STEPS: i32 = 1;
+ /// A fire this big (RimWorld's `fireSize`) burns as a big one, with smoke above it.
+ const BIG_FIRE: f32 = 0.9;
+ /// Gas this thick (of 255) shows; rot stink only when this thick.
+@@ -4697,7 +4907,12 @@ const THICK_ROT: u8 = 140;
+ 
+ /// The effects kept going for RimWorld's fires and gas (M20), by a key steady from frame to
+ /// frame: the nearest the eye, as many as MW2 can carry.
+-fn lasting_effects(floor: &FlatFloor, fires: &[rimworld_bridge::FireState], gas: &[rimworld_bridge::GasPatch]) -> HashMap<u64, frame::RimFxShot> {
++fn lasting_effects(
++    floor: &FlatFloor,
++    fires: &[rimworld_bridge::FireState],
++    gas: &[rimworld_bridge::GasPatch],
++    weather: rimworld_bridge::Weather,
++) -> HashMap<u64, frame::RimFxShot> {
+     let size = floor.size;
+     let eye = floor.eye.map(|eye| Vec2::new(eye[0] as f32, eye[2] as f32));
+     let away = |p: Vec3| eye.map_or(0.0, |eye| eye.distance(Vec2::new(p.x, p.z)));
+@@ -4743,6 +4958,21 @@ fn lasting_effects(floor: &FlatFloor, fires: &[rimworld_bridge::FireState], gas:
+     for (_, names, [x, z], at) in hanging.into_iter().take(MAX_GAS_EFFECTS) {
+         held.insert(key(3, x, z), frame::RimFxShot { names, origin: to_map(at), forward: up });
+     }
++    if let (true, Some(eye), Some(detail)) = (weather.fog >= FOG_FX_FROM, floor.eye, floor.detail.as_deref()) {
++        let step = FOG_FX_STEP * CELL;
++        let snap = |v: f64| (v as i32).div_euclid(step) * step + step / 2;
++        let blocks = size * CELL;
++        for dx in -FOG_FX_STEPS..=FOG_FX_STEPS {
++            for dz in -FOG_FX_STEPS..=FOG_FX_STEPS {
++                let (x, z) = (snap(eye[0]) + dx * step, snap(eye[2]) + dz * step);
++                if x < 0 || z < 0 || x >= blocks || z >= blocks || detail.roof_at(x, z) != roof::NONE {
++                    continue;
++                }
++                let at = Vec3::new(x as f32, 0.0, z as f32);
++                held.insert(key(4, x as f32, z as f32), frame::RimFxShot { names: fx_names::FOG, origin: to_map(at), forward: up });
++            }
++        }
++    }
+     held
+ }
+ 
+@@ -4759,7 +4989,8 @@ fn present_effects(mut floor: ResMut<FlatFloor>, link: Option<Res<RimworldLink>>
+     let link = link.as_deref();
+     let fires = link.and_then(|link| link.fires.as_deref()).map_or(&[][..], Vec::as_slice);
+     let gas = link.and_then(|link| link.gas.as_deref()).map_or(&[][..], Vec::as_slice);
+-    let held = lasting_effects(&floor, fires, gas);
++    let weather = link.and_then(|link| link.weather).unwrap_or(CLEAR_WEATHER);
++    let held = lasting_effects(&floor, fires, gas, weather);
+     if fx.held != held {
+         fx.held = held;
+     }
+@@ -5790,11 +6021,116 @@ mod tests {
+             rimworld_bridge::GasPatch { at: [20, 20], kind: "smoke".into(), density: 200 },
+             rimworld_bridge::GasPatch { at: [22, 20], kind: "rot".into(), density: 40 },
+         ];
+-        let held = lasting_effects(&floor, &fires, &gas);
++        let held = lasting_effects(&floor, &fires, &gas, rimworld_bridge::Weather::default());
+         // A small fire, a big fire and its smoke, and the smoke; rot stink this thin shows nothing.
+         assert_eq!(held.len(), 4);
+         assert_eq!(held.values().filter(|shot| shot.names == fx_names::FIRE_BIG).count(), 1);
+-        assert_eq!(lasting_effects(&floor, &fires, &gas), held, "the same keys from frame to frame");
++        assert_eq!(lasting_effects(&floor, &fires, &gas, rimworld_bridge::Weather::default()), held, "the same keys from frame to frame");
++    }
++
++    fn fleck(fade_in: f32, solid: f32, fade_out: f32) -> rimworld_bridge::FleckState {
++        rimworld_bridge::FleckState {
++            tex: 7,
++            x: 10.5,
++            z: 10.5,
++            y: 0.0,
++            size: 1.0,
++            grow: 0.0,
++            rot: 0.0,
++            spin: 0.0,
++            vx: 0.0,
++            vz: 0.0,
++            vy: 0.0,
++            fade_in,
++            solid,
++            fade_out,
++            color: [1.0; 4],
++            flat: false,
++        }
++    }
++
++    #[test]
++    fn flecks_fade_in_stay_fade_out_and_go() {
++        let mut flecks = vec![FleckLive { fleck: fleck(0.5, 1.0, 1.0), age: 0.0 }];
++        age_flecks(&mut flecks, 0.25);
++        assert!((flecks[0].shown() - 0.5).abs() < 1e-4, "half faded in");
++        age_flecks(&mut flecks, 1.0);
++        assert_eq!(flecks[0].shown(), 1.0);
++        age_flecks(&mut flecks, 0.75);
++        assert!((flecks[0].shown() - 0.5).abs() < 1e-4, "half faded out");
++        age_flecks(&mut flecks, 0.6);
++        assert!(flecks.is_empty(), "its time is up");
++        let mut many: Vec<FleckLive> = (0..MAX_FLECKS + 10).map(|_| FleckLive { fleck: fleck(0.0, 5.0, 0.0), age: 0.0 }).collect();
++        age_flecks(&mut many, 0.1);
++        assert_eq!(many.len(), MAX_FLECKS, "the oldest go first");
++    }
++
++    #[test]
++    fn fog_and_rain_close_in_the_view() {
++        let clear = 400.0;
++        assert_eq!(murk(clear, rimworld_bridge::Weather::default()), (clear, 0.0));
++        let (sight, thick) = murk(clear, rimworld_bridge::Weather { fog: 1.0, ..Default::default() });
++        assert_eq!((sight, thick), (FOG_SIGHT, 1.0));
++        let (rain_sight, rain_murk) = murk(clear, rimworld_bridge::Weather { rain: 1.5, ..Default::default() });
++        assert!(rain_sight > FOG_SIGHT && rain_sight < clear && rain_murk < 1.0, "{rain_sight} {rain_murk}");
++    }
++
++    #[test]
++    fn filth_flecks_rain_and_snow_draw_but_not_under_a_roof() {
++        let mut cutouts = HashMap::new();
++        cutouts.insert(7u16, [0.0, 0.0, 1.0, 1.0]);
++        let size = 40;
++        // Roofed over the west half.
++        let roofs = rimworld_bridge::Roofs {
++            size: [size, size],
++            cells: (0..size * size).map(|i| if i % size < size / 2 { b'c' } else { b'.' }).collect(),
++            hills: 0,
++        };
++        let detail = Detail::new(size, None, Some(&roofs), None, &[], &[], None);
++        let mut floor = FlatFloor {
++            size,
++            cutouts: Arc::new(cutouts),
++            detail: Some(Arc::new(detail)),
++            eye: Some([f64::from(size * CELL) * 0.75, 2.0, f64::from(size * CELL) / 2.0]),
++            ..Default::default()
++        };
++        // A picture is two-sided (two quads); a drop or flake one.
++        let quads = |mesh: &(Vec<u8>, Vec<u32>)| mesh.1.len() / 6;
++        let splotch = rimworld_bridge::FilthState { tex: 7, size: 1.0, x: 30.5, z: 20.5, rot: 45.0 };
++        let unknown = rimworld_bridge::FilthState { tex: 99, ..splotch };
++        assert_eq!(quads(&effect_mesh(&floor, &[splotch, unknown], rimworld_bridge::Weather::default())), 2, "a picture it doesn't have is skipped");
++        floor.flecks.push(FleckLive { fleck: fleck(0.0, 1.0, 0.0), age: 0.0 });
++        floor.flecks.push(FleckLive { fleck: rimworld_bridge::FleckState { flat: true, ..fleck(0.0, 1.0, 0.0) }, age: 0.0 });
++        assert_eq!(quads(&effect_mesh(&floor, &[], rimworld_bridge::Weather::default())), 4);
++        floor.flecks.clear();
++        let rain = quads(&effect_mesh(&floor, &[], rimworld_bridge::Weather { rain: 1.0, ..Default::default() }));
++        assert!(rain > 300 && rain <= RAIN_DROPS as usize, "drops out in the open: {rain}");
++        // Under the roof, the drops around the eye fall only where it is open.
++        floor.eye = Some([f64::from(size * CELL) * 0.5, 2.0, f64::from(size * CELL) / 2.0]);
++        let half = quads(&effect_mesh(&floor, &[], rimworld_bridge::Weather { rain: 1.0, ..Default::default() }));
++        assert!(half < rain * 3 / 4 && half > rain / 4, "about half fall on the roof: {half} of {rain}");
++        let snow = quads(&effect_mesh(&floor, &[], rimworld_bridge::Weather { snow: 1.0, ..Default::default() }));
++        assert!(snow > 100, "flakes: {snow}");
++    }
++
++    #[test]
++    fn fog_lays_mw2_ground_fog_in_the_open_around_the_eye() {
++        let size = 60;
++        let roofs = rimworld_bridge::Roofs { size: [size, size], cells: vec![b'.'; (size * size) as usize], hills: 0 };
++        let mut floor = FlatFloor {
++            size,
++            detail: Some(Arc::new(Detail::new(size, None, Some(&roofs), None, &[], &[], None))),
++            eye: Some([f64::from(size * CELL) / 2.0, 2.0, f64::from(size * CELL) / 2.0]),
++            ..Default::default()
++        };
++        let foggy = rimworld_bridge::Weather { fog: 1.0, ..Default::default() };
++        let held = lasting_effects(&floor, &[], &[], foggy);
++        assert_eq!(held.len(), 9);
++        assert!(held.values().all(|shot| shot.names == fx_names::FOG));
++        assert!(lasting_effects(&floor, &[], &[], rimworld_bridge::Weather { fog: 0.1, ..Default::default() }).is_empty());
++        // A step within the same patch keeps the same effects going.
++        floor.eye = floor.eye.map(|[x, y, z]| [x + 1.0, y, z]);
++        assert_eq!(lasting_effects(&floor, &[], &[], foggy).keys().collect::<std::collections::BTreeSet<_>>(), held.keys().collect());
+     }
+ 
+     #[test]
+diff --git a/crates/rimworld_world/src/rimview.rs b/crates/rimworld_world/src/rimview.rs
+index e89b9dc..3bb169a 100644
+--- a/crates/rimworld_world/src/rimview.rs
++++ b/crates/rimworld_world/src/rimview.rs
+@@ -329,6 +329,22 @@ mod window {
+         }
+     }
+ 
++    /// Whether `window` is still a window (its program still runs).
++    #[cfg(windows)]
++    pub(super) fn exists(window: i64) -> bool {
++        #[link(name = "user32")]
++        unsafe extern "system" {
++            fn IsWindow(window: isize) -> i32;
++        }
++        // SAFETY: IsWindow takes any value and only answers.
++        unsafe { IsWindow(window as isize) != 0 }
++    }
++
++    #[cfg(not(windows))]
++    pub(super) fn exists(_window: i64) -> bool {
++        true
++    }
++
+     #[cfg(not(windows))]
+     pub(super) fn own() -> Option<i64> {
+         None
+@@ -346,6 +362,8 @@ pub(crate) struct OneWindow {
+     /// Whether this connection's RimWorld has been told our window.
+     told: bool,
+     hidden: bool,
++    /// The thread that closes MW2 once RimWorld has closed is running (M21).
++    watching: bool,
+ }
+ 
+ /// Whether MW2's window hides while no colonist is controlled: on unless
+@@ -365,6 +383,29 @@ fn fullscreen_on() -> bool {
+     !matches!(std::env::var("RWMW2_FULLSCREEN").map(|v| v.trim().to_lowercase()).as_deref(), Ok("0" | "off" | "false"))
+ }
+ 
++/// Checks a second apart that RimWorld must have been gone for before MW2 closes too.
++const GONE_CHECKS: u32 = 3;
++
++/// M21, one application: once RimWorld has closed (its window is gone and nothing is
++/// connected), MW2 closes too, so `play` ends. Watched from a thread of its own, because
++/// while MW2's window is hidden the game loop may get no frames at all.
++fn watch_rimworld() {
++    use std::sync::atomic::Ordering;
++    let mut gone = 0;
++    loop {
++        std::thread::sleep(std::time::Duration::from_secs(1));
++        let rimworld = rimworld_bridge::RIMWORLD_WINDOW.load(Ordering::Relaxed);
++        let closed = rimworld != 0 && !rimworld_bridge::CONNECTED.load(Ordering::Relaxed) && !window::exists(rimworld);
++        gone = if closed { gone + 1 } else { 0 };
++        if gone >= GONE_CHECKS {
++            println!("[rimworld] RimWorld has closed: closing MW2 too (RWMW2_ONE_WINDOW=0 keeps it open)");
++            use std::io::Write;
++            let _ = std::io::stdout().flush();
++            std::process::exit(0);
++        }
++    }
++}
++
+ /// M12, one application: the game is played in RimWorld, and MW2's window only shows while
+ /// RimWorld's "Control in MW2" hands it a colonist; letting the colonist go hides it again.
+ /// RimWorld is told our window in our `hello`, or as soon as we find it.
+@@ -377,6 +418,9 @@ pub(crate) fn one_window(
+     mut state: Local<OneWindow>,
+ ) {
+     use std::sync::atomic::Ordering;
++    if !state.watching && one_window_on() {
++        state.watching = std::thread::Builder::new().name("rimworld watch".into()).spawn(watch_rimworld).is_ok();
++    }
+     let connected = link.as_deref().is_some_and(|link| link.connected);
+     let mut window = rimworld_bridge::OWN_WINDOW.load(Ordering::Relaxed);
+     if window == 0 {

@@ -1,0 +1,460 @@
+diff --git a/crates/render_gpu/src/drawsurf/minecraft_world.rs b/crates/render_gpu/src/drawsurf/minecraft_world.rs
+index 83afbe3..e2e8433 100644
+--- a/crates/render_gpu/src/drawsurf/minecraft_world.rs
++++ b/crates/render_gpu/src/drawsurf/minecraft_world.rs
+@@ -725,7 +725,8 @@ fn translucent(in: Out) -> @location(0) vec4<f32> {
+ 
+ // viewer/src/sky.wgsl, with the view ray taken from the MW2 camera.
+ struct SkyOut {
+-    @builtin(position) clip: vec4<f32>,
++    // Invariant: drawn with an Equal depth test against the cleared depth.
++    @builtin(position) @invariant clip: vec4<f32>,
+     @location(0) ndc: vec2<f32>,
+ }
+ 
+diff --git a/crates/rimworld_bridge/src/lib.rs b/crates/rimworld_bridge/src/lib.rs
+index c252a1f..6f238c3 100644
+--- a/crates/rimworld_bridge/src/lib.rs
++++ b/crates/rimworld_bridge/src/lib.rs
+@@ -1,4 +1,4 @@
+-//! RimWorld x MW2 bridge, engine side (milestone M0).
++//! RimWorld x MW2 bridge, engine side (milestones M0 and M1).
+ //!
+ //! A background thread listens on localhost (default `127.0.0.1:47820`, override with
+ //! `RWMW2_BRIDGE_ADDR`) for the RimWorld mod, answers its `hello`, and forwards every
+@@ -14,6 +14,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
+ 
+ use bevy::prelude::*;
+ use rwmw2_protocol::{DEFAULT_ADDR, Message, PROTOCOL_VERSION, Side};
++pub use rwmw2_protocol::{PawnState, Stance};
+ 
+ pub struct RimworldBridgePlugin;
+ 
+@@ -48,6 +49,11 @@ pub struct RimworldLink {
+     pub game_version: Option<String>,
+     /// RimWorld's `TicksGame` from the latest heartbeat.
+     pub last_tick: Option<i64>,
++    /// The map in view's size in cells, x then z, from the latest snapshot that had it.
++    pub map_size: Option<[i32; 2]>,
++    /// Every pawn on that map, from the latest snapshot.
++    pub pawns: Vec<PawnState>,
++    pub snapshots: u64,
+ }
+ 
+ enum BridgeEvent {
+@@ -118,7 +124,19 @@ fn drain_inbox(inbox: Res<RimworldInbox>, mut link: ResMut<RimworldLink>) {
+                 link.last_tick = Some(tick);
+                 report(&format!("RimWorld tick {tick}"));
+             }
+-            // Snapshots, shots and the rest arrive with M1/M2.
++            BridgeEvent::Received(Message::Snapshot { map, pawns, .. }) => {
++                let player = |pawns: &[PawnState]| pawns.iter().filter(|p| p.faction == "player").count();
++                if link.snapshots == 0 || pawns.len() != link.pawns.len() || player(&pawns) != player(&link.pawns) {
++                    let size = map.or(link.map_size).map_or_else(|| "?".to_owned(), |[x, z]| format!("{x}x{z}"));
++                    report(&format!("map {size}: {} pawns, {} of them yours", pawns.len(), player(&pawns)));
++                }
++                if map.is_some() {
++                    link.map_size = map;
++                }
++                link.pawns = pawns;
++                link.snapshots += 1;
++            }
++            // Shots and the rest arrive with M2.
+             BridgeEvent::Received(_) => {}
+         }
+     }
+@@ -146,7 +164,7 @@ mod tests {
+ 
+         let mut client = TcpStream::connect("127.0.0.1:47899").expect("plugin is listening");
+         client
+-            .write_all(b"{\"t\":\"hello\",\"side\":\"rimworld\",\"protocol\":0,\"game_version\":\"1.6.4871 rev590\"}\n{\"t\":\"tick\",\"tick\":600}\n")
++            .write_all(b"{\"t\":\"hello\",\"side\":\"rimworld\",\"protocol\":0,\"game_version\":\"1.6.4871 rev590\"}\n{\"t\":\"tick\",\"tick\":600}\n{\"t\":\"snapshot\",\"tick\":601,\"map\":[200,200],\"pawns\":[{\"id\":\"Human1\",\"x\":10.5,\"z\":20.5,\"rot\":90,\"stance\":\"stand\",\"downed\":false,\"faction\":\"player\"}]}\n")
+             .unwrap();
+         let mut reply = String::new();
+         BufReader::new(client.try_clone().unwrap()).read_line(&mut reply).unwrap();
+@@ -154,7 +172,7 @@ mod tests {
+ 
+         for _ in 0..200 {
+             app.update();
+-            if app.world().resource::<RimworldLink>().last_tick == Some(600) {
++            if app.world().resource::<RimworldLink>().snapshots == 1 {
+                 break;
+             }
+             std::thread::sleep(std::time::Duration::from_millis(5));
+@@ -163,5 +181,8 @@ mod tests {
+         assert!(link.connected);
+         assert_eq!(link.game_version.as_deref(), Some("1.6.4871 rev590"));
+         assert_eq!(link.last_tick, Some(600));
++        assert_eq!(link.map_size, Some([200, 200]));
++        assert_eq!(link.pawns.len(), 1);
++        assert_eq!(link.pawns[0].x, 10.5);
+     }
+ }
+diff --git a/crates/rimworld_world/Cargo.toml b/crates/rimworld_world/Cargo.toml
+index 511b888..26f6d83 100644
+--- a/crates/rimworld_world/Cargo.toml
++++ b/crates/rimworld_world/Cargo.toml
+@@ -3,7 +3,7 @@ name = "rimworld_world"
+ version = "0.1.0"
+ edition.workspace = true
+ license.workspace = true
+-description = "RimWorld x MW2: the rimworld:flat map, a flat floor of RimWorld-sized cells drawn and collided as blocks."
++description = "RimWorld x MW2: the rimworld:flat map, a flat floor of RimWorld-sized cells drawn and collided as blocks, with a figure for each RimWorld pawn."
+ 
+ [dependencies]
+ assets.workspace = true
+@@ -12,8 +12,10 @@ diag.workspace = true
+ frame.workspace = true
+ net.workspace = true
+ render_anim.workspace = true
++rimworld_bridge.workspace = true
+ sim.workspace = true
+ minecraft_terrain = { path = "../minecraft_terrain" }
++bytemuck = "1"
+ image = { version = "0.25", default-features = false, features = ["png"] }
+ 
+ [lints]
+diff --git a/crates/rimworld_world/src/lib.rs b/crates/rimworld_world/src/lib.rs
+index 4741e08..0e01863 100644
+--- a/crates/rimworld_world/src/lib.rs
++++ b/crates/rimworld_world/src/lib.rs
+@@ -5,7 +5,14 @@
+ //! made in code: it needs no Minecraft files.
+ //!
+ //! Map origin is the middle of the floor and the floor's top is at height 0.
+-//! RimWorld cell `(x, z)` is block `(x, -1, z)`, its top face at block height 0.
++//! Block `(x, -1, z)` is a floor cell, its top face at block height 0. RimWorld's
++//! `z` grows north and block `z` grows south, so RimWorld cell `(x, z)` is block
++//! `(x, size - 1 - z)`.
++//!
++//! While RimWorld is connected the floor takes the size of its map, and every
++//! pawn on that map stands on it as a placeholder figure: a body and a head
++//! for people, coloured by side, lying down when downed.
++use std::collections::HashMap;
+ use std::sync::Arc;
+ 
+ use bevy::asset::RenderAssetUsages;
+@@ -13,7 +20,8 @@ use bevy::prelude::*;
+ use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+ use bevy::window::PrimaryWindow;
+ use image::{Rgba, RgbaImage};
+-use minecraft_terrain::mesh::{Atlas, SectionMesh, SectionVertex};
++use minecraft_terrain::mesh::{Atlas, SectionMesh, SectionVertex, Vertex};
++use rimworld_bridge::{PawnState, RimworldLink};
+ use render_anim::minecraft_world::MinecraftWorldView;
+ use sim::voxel::{BLOCK, VoxelChunk};
+ 
+@@ -31,6 +39,8 @@ const TILE_CELL: u32 = 0;
+ // 1, 2, 3: a cell with a strong line on its west, north, or both edges.
+ const TILE_CENTRE: u32 = 4;
+ const TILE_WALL: u32 = 5;
++/// Plain white, for figures coloured by their vertices.
++const TILE_WHITE: u32 = 6;
+ /// A cell grid line every this many cells, as RimWorld's own grid overlay.
+ const MAJOR_LINE: i32 = 10;
+ const FULL_BRIGHT: [u8; 2] = [15 * 16, 0];
+@@ -39,6 +49,10 @@ const MINIMAP_PIXELS: u32 = 512;
+ /// Seconds between tries at skipping the match start countdown.
+ const START_RETRY_SECONDS: f32 = 2.0;
+ const START_TRIES: u32 = 5;
++/// How quickly a figure closes on its pawn's latest position, per second.
++const FIGURE_FOLLOW: f32 = 12.0;
++/// A pawn that moved further than this between snapshots jumps there.
++const FIGURE_JUMP: f32 = 4.0;
+ 
+ pub struct RimworldWorldPlugin;
+ 
+@@ -73,6 +87,35 @@ pub struct FlatFloor {
+     /// Tries so far at skipping the countdown, and seconds since the last.
+     start_tries: u32,
+     since_start_try: f32,
++    /// One figure for each RimWorld pawn, by pawn id.
++    figures: HashMap<String, Figure>,
++}
++
++/// Where a pawn's figure stands, in block space, and how it looks.
++#[derive(Clone, Debug, PartialEq)]
++struct Figure {
++    x: f32,
++    z: f32,
++    /// Degrees clockwise from north, as RimWorld's `rot`.
++    yaw: f32,
++    kind: Kind,
++    side: SideColour,
++    downed: bool,
++}
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++enum Kind {
++    Humanlike,
++    Animal,
++    Mech,
++    Other,
++}
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++enum SideColour {
++    Player,
++    Hostile,
++    Neutral,
+ }
+ 
+ impl FlatFloor {
+@@ -104,7 +147,14 @@ fn update(
+     presented: Res<net::PresentedSnapshot>,
+     windows: Query<&Window, With<PrimaryWindow>>,
+     mut floor: ResMut<FlatFloor>,
++    link: Option<Res<RimworldLink>>,
+ ) {
++    // RimWorld's map size, while it is connected.
++    let wanted = link
++        .as_deref()
++        .filter(|link| link.connected)
++        .and_then(|link| link.map_size)
++        .map(|[x, z]| x.max(z).clamp(16, 1024));
+     let Some(mut view) = view else {
+         return;
+     };
+@@ -114,7 +164,7 @@ fn update(
+     {
+         floor.pending = false;
+         floor.active = true;
+-        floor.size = size();
++        floor.size = wanted.unwrap_or_else(size);
+         floor.origin = [f64::from(floor.size) / 2.0, 0.0, f64::from(floor.size) / 2.0];
+         floor.alive = Default::default();
+         floor.start_tries = 0;
+@@ -124,6 +174,18 @@ fn update(
+         diag::info!(World, "RimWorld flat floor: {0} by {0} cells", floor.size);
+         println!("[rimworld] flat floor ready: {0} by {0} cells", floor.size);
+     }
++    // The floor follows RimWorld's map size.
++    if floor.active
++        && let Some(size) = wanted.filter(|&size| size != floor.size)
++        && let Some(authority) = authority.as_deref()
++    {
++        floor.size = size;
++        floor.origin = [f64::from(size) / 2.0, 0.0, f64::from(size) / 2.0];
++        floor.figures.clear();
++        build(&floor, authority, &mut view);
++        floor.minimap = Some(images.add(minimap(size)));
++        println!("[rimworld] flat floor resized to RimWorld's map: {size} by {size} cells");
++    }
+     for _ in torn_down.read() {
+         stop(&mut floor, &mut view, ui.as_deref_mut());
+     }
+@@ -169,6 +231,12 @@ fn update(
+         ui.floor_minimap = true;
+     }
+ 
++    // RimWorld's pawns, as figures on the floor.
++    let pawns = link.as_deref().map_or(&[][..], |link| link.pawns.as_slice());
++    let size = floor.size;
++    follow_pawns(&mut floor.figures, pawns, size, time.delta_secs());
++    view.entity_meshes[0] = figure_mesh(floor.figures.values());
++
+     let Some(ps) = presented.player(local.0) else {
+         return;
+     };
+@@ -224,6 +292,8 @@ fn stop(floor: &mut FlatFloor, view: &mut MinecraftWorldView, ui: Option<&mut fr
+     }
+     floor.active = false;
+     floor.minimap = None;
++    floor.figures.clear();
++    view.entity_meshes = Default::default();
+     if let Some(ui) = ui {
+         ui.minimap = None;
+         ui.floor_minimap = false;
+@@ -379,6 +449,7 @@ fn atlas() -> Atlas {
+     tile(&mut pixels, TILE_CENTRE, &|x, y| {
+         if x == 0 || y == 0 { [150, 80, 30] } else { [224, 122, 40] }
+     });
++    tile(&mut pixels, TILE_WHITE, &|_, _| [255, 255, 255]);
+     tile(&mut pixels, TILE_WALL, &|x, y| {
+         if x == 0 || y == 0 || x == TILE - 1 || y == TILE - 1 { [78, 82, 90] } else { [104, 110, 120] }
+     });
+@@ -401,6 +472,135 @@ fn atlas() -> Atlas {
+     Atlas::from_pixels(pixels, mipmaps)
+ }
+ 
++/// A pawn's figure as it should look now, standing on its RimWorld cell.
++fn figure_of(pawn: &PawnState, size: i32) -> Figure {
++    Figure {
++        x: pawn.x,
++        z: size as f32 - pawn.z,
++        yaw: pawn.rot,
++        kind: match pawn.kind.as_deref() {
++            Some("humanlike") => Kind::Humanlike,
++            Some("animal") => Kind::Animal,
++            Some("mech") => Kind::Mech,
++            _ => Kind::Other,
++        },
++        side: match pawn.faction.as_str() {
++            "player" => SideColour::Player,
++            "hostile" => SideColour::Hostile,
++            _ => SideColour::Neutral,
++        },
++        downed: pawn.downed,
++    }
++}
++
++/// Moves each figure towards its pawn, adds new pawns and drops gone ones.
++fn follow_pawns(figures: &mut HashMap<String, Figure>, pawns: &[PawnState], size: i32, dt: f32) {
++    figures.retain(|id, _| pawns.iter().any(|pawn| &pawn.id == id));
++    let step = 1.0 - (-FIGURE_FOLLOW * dt).exp();
++    for pawn in pawns {
++        let target = figure_of(pawn, size);
++        match figures.get_mut(&pawn.id) {
++            Some(figure) if (figure.x - target.x).hypot(figure.z - target.z) < FIGURE_JUMP => {
++                let (x, z) = (figure.x + (target.x - figure.x) * step, figure.z + (target.z - figure.z) * step);
++                *figure = Figure { x, z, ..target };
++            }
++            _ => {
++                figures.insert(pawn.id.clone(), target);
++            }
++        }
++    }
++}
++
++/// Every figure's boxes, as MinecraftOSS entity vertices and indices.
++fn figure_mesh<'a>(figures: impl Iterator<Item = &'a Figure>) -> (Vec<u8>, Vec<u32>) {
++    let (mut vertices, mut indices) = (Vec::new(), Vec::new());
++    for figure in figures {
++        let body = match (figure.side, figure.kind) {
++            (SideColour::Player, _) => [0.22, 0.45, 0.95],
++            (SideColour::Hostile, _) => [0.90, 0.16, 0.14],
++            (SideColour::Neutral, Kind::Animal) => [0.62, 0.47, 0.30],
++            (SideColour::Neutral, _) => [0.95, 0.80, 0.25],
++        };
++        let skin = [0.93, 0.78, 0.62];
++        let dark = [0.12, 0.12, 0.14];
++        let mut put = |forward: f32, right: f32, y: f32, [w, d, h]: [f32; 3], colour: [f32; 3]| {
++            add_box(&mut vertices, &mut indices, figure, [forward, right, y], [w, d, h], colour);
++        };
++        match (figure.kind, figure.downed) {
++            // Lying along its facing, head first.
++            (Kind::Humanlike, true) => {
++                put(-0.2, 0.0, 0.0, [0.5, 1.2, 0.3], body);
++                put(0.6, 0.0, 0.0, [0.36, 0.36, 0.3], skin);
++            }
++            // About an MW2 soldier's height: a body, a head and a visor showing the facing.
++            (Kind::Humanlike, false) => {
++                put(0.0, 0.0, 0.0, [0.5, 0.3, 1.45], body);
++                put(0.0, 0.0, 1.45, [0.36, 0.36, 0.36], skin);
++                put(0.2, 0.0, 1.58, [0.24, 0.06, 0.08], dark);
++            }
++            (Kind::Animal, downed) => {
++                let h = if downed { 0.3 } else { 0.6 };
++                put(0.0, 0.0, 0.0, [0.5, 0.9, h], body);
++                put(0.55, 0.0, h * 0.6, [0.3, 0.3, 0.3], body);
++            }
++            (Kind::Mech, downed) => {
++                let h = if downed { 0.4 } else { 1.6 };
++                let grey = body.map(|c| c * 0.5);
++                put(0.0, 0.0, 0.0, [0.8, 0.8, h], grey);
++                put(0.42, 0.0, h * 0.75, [0.3, 0.06, 0.1], [1.0, 0.2, 0.1]);
++            }
++            (Kind::Other, _) => put(0.0, 0.0, 0.0, [0.5, 0.5, 0.5], body),
++        }
++    }
++    (bytemuck::cast_slice(&vertices).to_vec(), indices)
++}
++
++/// A box on a figure: centred `forward` and `right` blocks from it along its
++/// facing, from height `y`, `[width, depth, height]` blocks, all six faces.
++fn add_box(
++    vertices: &mut Vec<Vertex>,
++    indices: &mut Vec<u32>,
++    figure: &Figure,
++    [forward, right, y]: [f32; 3],
++    [w, d, h]: [f32; 3],
++    colour: [f32; 3],
++) {
++    // Facing north (block -Z) at yaw 0, turning clockwise seen from above.
++    let yaw = figure.yaw.to_radians();
++    let (ahead, side) = ([yaw.sin(), -yaw.cos()], [yaw.cos(), yaw.sin()]);
++    let at = |f: f32, r: f32, up: f32| {
++        [
++            figure.x + ahead[0] * (forward + f) + side[0] * (right + r),
++            y + up,
++            figure.z + ahead[1] * (forward + f) + side[1] * (right + r),
++        ]
++    };
++    let (hw, hd) = (w / 2.0, d / 2.0);
++    // Faces as four (forward, right, up) corners, with Minecraft's shades.
++    let faces: [([[f32; 3]; 4], f32); 6] = [
++        ([[-hd, -hw, h], [hd, -hw, h], [hd, hw, h], [-hd, hw, h]], 1.0),
++        ([[-hd, -hw, 0.0], [-hd, hw, 0.0], [hd, hw, 0.0], [hd, -hw, 0.0]], 0.5),
++        ([[hd, -hw, 0.0], [hd, hw, 0.0], [hd, hw, h], [hd, -hw, h]], 0.8),
++        ([[-hd, hw, 0.0], [-hd, -hw, 0.0], [-hd, -hw, h], [-hd, hw, h]], 0.8),
++        ([[-hd, -hw, 0.0], [hd, -hw, 0.0], [hd, -hw, h], [-hd, -hw, h]], 0.6),
++        ([[hd, hw, 0.0], [-hd, hw, 0.0], [-hd, hw, h], [hd, hw, h]], 0.6),
++    ];
++    let uv = [(TILE_WHITE as f32 + 0.5) / TILES as f32, 0.5];
++    for (corners, shade) in faces {
++        let base = vertices.len() as u32;
++        for [f, r, up] in corners {
++            vertices.push(Vertex {
++                position: at(f, r, up),
++                uv,
++                color: [colour[0] * shade, colour[1] * shade, colour[2] * shade, 1.0],
++                sky_light: 15.0,
++                block_light: 0.0,
++            });
++        }
++        indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
++    }
++}
++
+ /// The floor seen from above, north (block -Z) up, wall included: the
+ /// floor's colours, a grid line every 10 cells and the middle cell.
+ fn minimap(size: i32) -> Image {
+@@ -512,6 +712,48 @@ mod tests {
+         assert_eq!(&data[0..3], &[104, 110, 120], "the wall at the north-west corner");
+     }
+ 
++    fn pawn(id: &str, x: f32, z: f32) -> PawnState {
++        PawnState {
++            id: id.into(),
++            name: None,
++            kind: Some("humanlike".into()),
++            x,
++            z,
++            rot: 90.0,
++            stance: rimworld_bridge::Stance::Stand,
++            weapon: None,
++            downed: false,
++            faction: "player".into(),
++        }
++    }
++
++    #[test]
++    fn figures_follow_pawns_with_north_up() {
++        let mut figures = HashMap::new();
++        follow_pawns(&mut figures, &[pawn("a", 10.5, 0.5)], 250, 0.016);
++        let a = &figures["a"];
++        // RimWorld's southernmost row is the floor's last block row.
++        assert_eq!((a.x, a.z), (10.5, 249.5));
++        // A small step is eased into; a pawn that is gone loses its figure.
++        follow_pawns(&mut figures, &[pawn("a", 11.5, 0.5)], 250, 0.016);
++        assert!(figures["a"].x > 10.5 && figures["a"].x < 11.5);
++        follow_pawns(&mut figures, &[], 250, 0.016);
++        assert!(figures.is_empty());
++    }
++
++    #[test]
++    fn a_standing_person_is_three_boxes_facing_east() {
++        let figure = figure_of(&pawn("a", 10.5, 10.5), 250);
++        let (bytes, indices) = figure_mesh(std::iter::once(&figure));
++        let vertices: &[Vertex] = bytemuck::cast_slice(&bytes);
++        assert_eq!(indices.len(), 3 * 6 * 6);
++        // The visor (the last box) is east of the body: rot 90 faces east.
++        let visor_x = vertices[vertices.len() - 24..].iter().map(|v| v.position[0]).sum::<f32>() / 24.0;
++        assert!(visor_x > figure.x + 0.1, "{visor_x}");
++        let top = vertices.iter().map(|v| v.position[1]).fold(0.0, f32::max);
++        assert!((top - 1.81).abs() < 1e-3);
++    }
++
+     #[test]
+     fn map_origin_is_the_middle_of_the_floor() {
+         let floor = FlatFloor { size: 250, origin: [125.0, 0.0, 125.0], ..Default::default() };

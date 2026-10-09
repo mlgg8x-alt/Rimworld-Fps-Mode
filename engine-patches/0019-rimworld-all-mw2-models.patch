@@ -1,0 +1,245 @@
+diff --git a/crates/assets/src/lane/helpers.rs b/crates/assets/src/lane/helpers.rs
+index e63b7c3..4394e4b 100644
+--- a/crates/assets/src/lane/helpers.rs
++++ b/crates/assets/src/lane/helpers.rs
+@@ -51,6 +51,20 @@ impl MapXModelCatalog {
+         self.scene_assets.set_capture_zone(zone);
+     }
+ 
++    /// Every model this walk captured, for another map's catalog to absorb.
++    pub(crate) fn take_scene_assets(&mut self) -> MapXModelSceneCatalog {
++        std::mem::take(&mut self.scene_assets)
++    }
++
++    /// Adds models from another walk; ones this map already has stay its own.
++    pub(crate) fn absorb_scene_assets(&mut self, other: MapXModelSceneCatalog) {
++        self.scene_assets.absorb_captured(other);
++    }
++
++    pub(crate) fn scene_asset_count(&self) -> usize {
++        self.scene_assets.len()
++    }
++
+     pub(crate) fn capture(
+         &mut self,
+         stream: &ZoneStream<'_>,
+diff --git a/crates/assets/src/lane/iw4.rs b/crates/assets/src/lane/iw4.rs
+index fbdfb84..d97cf4a 100644
+--- a/crates/assets/src/lane/iw4.rs
++++ b/crates/assets/src/lane/iw4.rs
+@@ -150,6 +150,15 @@ impl ZoneLane for Iw4Lane {
+         let light_def_table = sink.light_def_table;
+         let light_def_bodies = sink.light_def_bodies;
+         let mut materials = std::mem::take(&mut sink.materials);
++        if crate::minecraft_map::flat_load() {
++            absorb_other_map_models(
++                path,
++                progress,
++                &mut materials,
++                &mut sink.map_xmodels,
++                &mut report,
++            );
++        }
+ 
+         let absorbed = materials.absorb_technique_set_tables(&seeded_techsets);
+         let stub_routed = materials.reroute_stub_materials();
+@@ -1231,6 +1240,102 @@ fn push_mapents_key_census(report: &mut Vec<String>, stream: &fastfile_iw4::Zone
+     }
+ }
+ 
++/// RimWorld floor: the models and materials of every other MW2 multiplayer
++/// map, so RimWorld things can be drawn with any of them, not only the
++/// stand-in map's. The stand-in's own stay as they are. Their color maps are
++/// decoded with the map's. `RWMW2_ALL_MAPS=0` turns this off.
++fn absorb_other_map_models(
++    path: &Path,
++    progress: &LoadProgress,
++    materials: &mut asset_material::MaterialCatalog,
++    map_xmodels: &mut super::helpers::MapXModelCatalog,
++    report: &mut Vec<String>,
++) {
++    if std::env::var("RWMW2_ALL_MAPS").is_ok_and(|v| v.trim() == "0") {
++        report.push("rimworld: other maps' models off (RWMW2_ALL_MAPS=0)".into());
++        return;
++    }
++    let zones = other_map_zones(path);
++    let before = map_xmodels.scene_asset_count();
++    let stage = progress.begin_scoped(StageId::MapAssets, "other maps", Some(zones.len() as u64));
++    let mut walked = 0;
++    for (n, zone) in zones.iter().enumerate() {
++        if progress.is_canceled() {
++            break;
++        }
++        stage.set_completed(n as u64);
++        let image = match asset_transport::open_zone(zone) {
++            Ok(image) if image.game == ZoneGame::Iw4 => image,
++            Ok(_) => continue,
++            Err(error) => {
++                diag::warn!(World, "rimworld: skipped {}: {error}", zone.display());
++                continue;
++            }
++        };
++        let Ok(header) = image.header() else {
++            continue;
++        };
++        let mut memory = ZoneMemory::for_header(&header);
++        let Ok(mut stream) = memory.stream(&image.bytes) else {
++            continue;
++        };
++        let mut sink = ZoneWalkSink::default();
++        sink.set_capture_zone(asset_core::ZoneOwner::from_zone_path(zone));
++        sink.set_capture_ns(asset_core::AssetNamespace::Iw4);
++        if let Err(error) = load_zone(&mut stream, &mut sink) {
++            diag::warn!(
++                World,
++                "rimworld: {} walk stopped after {} assets: {error}",
++                zone.display(),
++                sink.walked
++            );
++        }
++        let mut scenes = sink.map_xmodels.take_scene_assets();
++        let linked = materials.absorb_asset_population(std::mem::take(&mut sink.materials));
++        scenes.remap_walk_materials(&linked);
++        map_xmodels.absorb_scene_assets(scenes);
++        walked += 1;
++    }
++    stage.done();
++    let line = format!(
++        "rimworld: added {} models from {walked} other maps ({} materials in all)",
++        map_xmodels.scene_asset_count().saturating_sub(before),
++        materials.materials.len()
++    );
++    diag::info!(World, "{line}");
++    report.push(line);
++}
++
++/// The other IW4 multiplayer map zones beside `path` and in the DLC folder.
++fn other_map_zones(path: &Path) -> Vec<std::path::PathBuf> {
++    let Some(dir) = path.parent() else {
++        return Vec::new();
++    };
++    let mut dirs = vec![dir.to_path_buf(), dir.join("dlc")];
++    if let Some(up) = dir.parent() {
++        dirs.push(up.join("dlc"));
++    }
++    let mut zones: Vec<std::path::PathBuf> = dirs
++        .iter()
++        .filter_map(|dir| std::fs::read_dir(dir).ok())
++        .flatten()
++        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
++        .filter(|zone| {
++            let Some(stem) = zone.file_stem().and_then(|s| s.to_str()) else {
++                return false;
++            };
++            let stem = stem.to_ascii_lowercase();
++            zone.extension().is_some_and(|e| e.eq_ignore_ascii_case("ff"))
++                && stem.starts_with("mp_")
++                && !stem.ends_with("_load")
++                && zone.file_stem() != path.file_stem()
++        })
++        .collect();
++    zones.sort();
++    zones.dedup_by(|a, b| a.file_stem() == b.file_stem());
++    zones
++}
++
+ fn decode_map_material_images(
+     path: &Path,
+     catalog: &mut asset_material::MaterialCatalog,
+diff --git a/crates/assets/src/match_load.rs b/crates/assets/src/match_load.rs
+index 8f44f6e..e08c34e 100644
+--- a/crates/assets/src/match_load.rs
++++ b/crates/assets/src/match_load.rs
+@@ -132,6 +132,7 @@ fn start_match_load(
+         cancel_handle.clone(),
+     ));
+ 
++    crate::minecraft_map::set_flat_load(crate::minecraft_map::is_flat(&zone));
+     let games = identity.map(|identity| asset_transport::GamesRoot(identity.games_root.clone()));
+     let task = crate::session_load::load_pool().spawn(async move {
+         let sound_path = zone_ff.clone();
+diff --git a/crates/assets/src/minecraft_map.rs b/crates/assets/src/minecraft_map.rs
+index 3cbd697..0b0c544 100644
+--- a/crates/assets/src/minecraft_map.rs
++++ b/crates/assets/src/minecraft_map.rs
+@@ -28,6 +28,18 @@ pub fn flat_proxy_map(games_root: &std::path::Path) -> String {
+     PROXY_MAP.to_owned()
+ }
+ 
++/// Whether the load in flight is the RimWorld floor. The zone walk sees only
++/// the stand-in map's path, so the match load says so here first.
++static FLAT_LOAD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
++
++pub fn set_flat_load(flat: bool) {
++    FLAT_LOAD.store(flat, std::sync::atomic::Ordering::Relaxed);
++}
++
++pub fn flat_load() -> bool {
++    FLAT_LOAD.load(std::sync::atomic::Ordering::Relaxed)
++}
++
+ pub fn is_flat(zone: &str) -> bool {
+     zone.eq_ignore_ascii_case(FLAT_ZONE)
+ }
+diff --git a/crates/rimworld_world/src/lib.rs b/crates/rimworld_world/src/lib.rs
+index a9abac4..9788a9c 100644
+--- a/crates/rimworld_world/src/lib.rs
++++ b/crates/rimworld_world/src/lib.rs
+@@ -2065,10 +2065,22 @@ fn plant_fallback(kind: &str) -> Option<&'static str> {
+     }
+ }
+ /// The most plants drawn at once, nearest the view first, out to this many cells; and
+-/// seconds between choosing them again.
+-const PLANT_MODELS: usize = 500;
+-const PLANT_REACH: f32 = 60.0;
++/// seconds between choosing them again. `RWMW2_PLANT_MODELS` and `RWMW2_PLANT_REACH` in
++/// the launcher's `.env` change the first two.
++const PLANT_MODELS: usize = 4000;
++const PLANT_REACH: f32 = 200.0;
+ const PLANT_RESELECT_SECONDS: f32 = 0.5;
++/// [`PLANT_MODELS`] and [`PLANT_REACH`], or what the environment says instead.
++fn plant_limits() -> (usize, f32) {
++    static LIMITS: std::sync::OnceLock<(usize, f32)> = std::sync::OnceLock::new();
++    *LIMITS.get_or_init(|| {
++        let read = |name: &str| std::env::var(name).ok().and_then(|v| v.trim().parse::<f32>().ok()).filter(|v| *v > 0.0);
++        let most = read("RWMW2_PLANT_MODELS").map_or(PLANT_MODELS, |v| v as usize);
++        let reach = read("RWMW2_PLANT_REACH").unwrap_or(PLANT_REACH);
++        diag::info!(Zone, "rimworld: up to {most} plant models within {reach} cells");
++        (most, reach)
++    })
++}
+ /// The part of a full grown plant's height a seedling stands.
+ const SEEDLING: f32 = 0.35;
+ /// Model ids for plants, apart from the soldiers'.
+@@ -2197,10 +2209,11 @@ fn place_plants(
+         let (bx, bz) = (f64::from(p.x) + 0.5, f64::from(size - p.z) - 0.5);
+         ((bx - eye[0]).hypot(bz - eye[2])) as f32
+     };
++    let (most, reach) = plant_limits();
+     let mut near: Vec<(f32, &rimworld_bridge::PlantState)> =
+-        all.iter().map(|p| (distance(p), p)).filter(|(d, _)| *d <= PLANT_REACH).collect();
++        all.iter().map(|p| (distance(p), p)).filter(|(d, _)| *d <= reach).collect();
+     near.sort_by(|a, b| a.0.total_cmp(&b.0));
+-    near.truncate(PLANT_MODELS);
++    near.truncate(most);
+     let Some(kinds) = plants.models.clone() else { return };
+     let mut keep = std::collections::HashSet::new();
+     for (_, plant) in near {
+diff --git a/crates/session/src/match_apply.rs b/crates/session/src/match_apply.rs
+index 5eff69b..696f8e0 100644
+--- a/crates/session/src/match_apply.rs
++++ b/crates/session/src/match_apply.rs
+@@ -793,6 +793,13 @@ fn preflight_match_install(
+     catalog: Option<&asset_game::MenuCatalog>,
+     identity: Option<&LaunchIdentity>,
+ ) -> Result<MatchInstallPlan, InstallRefusal> {
++    // The RimWorld floor shows only what RimWorld has: the stand-in map's own
++    // props (cars, crates, buckets) would hang at that map's heights over it.
++    if assets::minecraft_map::is_block_world_load(zone) && !assets::minecraft_map::is_minecraft_load(zone) {
++        let props = prepared.world.script_model_instances.len();
++        prepared.world.script_model_instances.clear();
++        diag::info!(World, "rimworld: left out the stand-in map's {props} props");
++    }
+     let killstreaks = assets::prepared::PreparedKillstreaks(
+         prepared
+             .scripts

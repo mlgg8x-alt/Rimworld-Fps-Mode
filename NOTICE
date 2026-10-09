@@ -1,0 +1,13 @@
+RimWorld x MW2
+Copyright 2026 RimWorld x MW2 contributors
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This project builds on, and is designed to run alongside:
+- IW4L (https://github.com/vladtrc/iw4L), Apache-2.0
+- chasm's 2010 Rust rewrite mashup (https://github.com/chasmlol/2010-rust-rewrite-mashup), Apache-2.0
+  Their LICENSE and NOTICE files ship with their source in engine/ after setup.
+- Harmony (https://github.com/pardeike/Harmony), MIT, loaded as a separate RimWorld mod.
+
+No game code or assets are included. RimWorld is (c) Ludeon Studios. Call of Duty:
+Modern Warfare 2 is (c) Activision. Unofficial fan project, not affiliated with either.

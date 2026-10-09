@@ -1,0 +1,410 @@
+diff --git a/crates/render_anim/src/occupancy/script_model.rs b/crates/render_anim/src/occupancy/script_model.rs
+index 4b0ea4d..9ef98cb 100644
+--- a/crates/render_anim/src/occupancy/script_model.rs
++++ b/crates/render_anim/src/occupancy/script_model.rs
+@@ -40,6 +40,17 @@ struct SpawnedSceneModel {
+     source: u32,
+ }
+ 
++/// Ids for [`ClientSceneModel`]s, apart from every server script model's.
++pub const CLIENT_MODEL_IDS: std::ops::Range<u32> = 0x8000_0000..0xC000_0000;
++
++/// A model a client system places itself each frame, with no server entity behind it: its
++/// `WorldScriptModelInstance` keeps the model, pose and `Transform` that system gives it,
++/// the snapshot neither shows nor hides it, and `id` (in [`CLIENT_MODEL_IDS`]) keys its pose.
++#[derive(Component, Clone, Copy, Debug)]
++pub struct ClientSceneModel {
++    pub id: u32,
++}
++
+ #[derive(Clone, Copy, Debug)]
+ struct ScriptMoverCentitySample {
+     angles: [f32; 3],
+@@ -329,7 +340,7 @@ fn sync_spawned_scene_models(
+ 
+ fn apply_presented_script_model_dobjs(
+     presented: Option<Res<net::PresentedSnapshot>>,
+-    mut owners: Query<(&mut WorldScriptModelInstance, &mut Visibility)>,
++    mut owners: Query<(&mut WorldScriptModelInstance, &mut Visibility), Without<ClientSceneModel>>,
+ ) {
+     let Some(snapshot) = presented.as_ref().and_then(|value| value.snapshot()) else {
+         return;
+@@ -510,7 +521,7 @@ fn pose_script_models(
+     facts: Res<WorldPresentFacts>,
+     xanims: Option<Res<assets::PreparedXAnims>>,
+     cameras: Query<(&GlobalTransform, &Projection, &Camera), With<FpvLens>>,
+-    owners: Query<(Entity, &WorldScriptModelInstance, &Transform, &Visibility)>,
++    owners: Query<(Entity, &WorldScriptModelInstance, &Transform, &Visibility, Option<&ClientSceneModel>)>,
+     mut persist: ResMut<ScriptModelDobjs>,
+     prepared: Res<crate::anim::model_materials::PreparedModelMaterials>,
+     mut product: ResMut<ScriptModelPoseProduct>,
+@@ -555,11 +566,12 @@ fn pose_script_models(
+         .ok()
+         .map(|(xf, _, _)| xf.translation().to_array());
+     let skinned_ramp = lod_skinned.args();
+-    for (entity, owner, transform, visibility) in &owners {
++    for (entity, owner, transform, visibility, client) in &owners {
+         let owner_id = owner
+             .authority_owner
+             .and_then(|owner| owner.script_model())
+-            .map(|id| id.to_wire());
++            .map(|id| id.to_wire())
++            .or(client.map(|client| client.id));
+         let focused_owner_id = focus_id.filter(|wanted| owner_id == Some(*wanted));
+         if let Some(id) = focused_owner_id {
+             focus.refuse(id, &owner.current_model.0, "unclassified_branch");
+diff --git a/crates/rimworld_world/Cargo.toml b/crates/rimworld_world/Cargo.toml
+index 24a1a41..6fae11b 100644
+--- a/crates/rimworld_world/Cargo.toml
++++ b/crates/rimworld_world/Cargo.toml
+@@ -6,16 +6,21 @@ license.workspace = true
+ description = "RimWorld x MW2: the rimworld:flat map, a flat floor of RimWorld-sized cells drawn and collided as blocks, with a figure for each RimWorld pawn."
+ 
+ [dependencies]
++anim_iw4.workspace = true
++asset_core.workspace = true
+ asset_material.workspace = true
+ asset_transport.workspace = true
++asset_world.workspace = true
+ assets.workspace = true
+ bevy.workspace = true
+ diag.workspace = true
+ frame.workspace = true
+ net.workspace = true
+ render_anim.workspace = true
++render_scene.workspace = true
+ rimworld_bridge.workspace = true
+ sim.workspace = true
++xmodel_runtime.workspace = true
+ minecraft_terrain = { path = "../minecraft_terrain" }
+ bytemuck = "1"
+ image = { version = "0.25", default-features = false, features = ["png"] }
+diff --git a/crates/rimworld_world/src/lib.rs b/crates/rimworld_world/src/lib.rs
+index bfda114..28431c9 100644
+--- a/crates/rimworld_world/src/lib.rs
++++ b/crates/rimworld_world/src/lib.rs
+@@ -32,10 +32,14 @@
+ //! trees, cover a block high to crouch behind, doors a gap under a lintel.
+ //! Cells that change in RimWorld (a wall built, rock mined) change here too.
+ //! Trees are a thin trunk to walk past, under a block of leaves overhead, as
+-//! RimWorld lets pawns walk through them. When the engine has fetched
+-//! Minecraft's files for its Minecraft map, the blocks wear Minecraft's
+-//! textures (dirt, sand, stone, planks, logs, leaves); otherwise plain ones
+-//! made here.
++//! RimWorld lets pawns walk through them. The blocks wear MW2's own textures,
++//! read from the game's files; where MW2 has none, Minecraft's when the engine
++//! has fetched them, else plain ones made here.
++//!
++//! People are MW2 soldiers, as MW2 draws its players: the map's soldier models
++//! (one side's for colonists, the other's for raiders) standing, running or
++//! lying prone with MW2's own animations. Animals and mechs stay figures, and
++//! so does anyone when the map has no soldier model or animation to use.
+ use std::collections::HashMap;
+ use std::sync::Arc;
+ 
+@@ -167,12 +171,15 @@ impl Plugin for RimworldWorldPlugin {
+     fn build(&self, app: &mut App) {
+         app.init_resource::<FlatFloor>().add_systems(
+             Update,
+-            update
+-                // Before the Minecraft world, which leaves a view it did
+-                // not turn on alone.
+-                .before(render_anim::minecraft_world::MinecraftWorldUpdate)
+-                .after(frame::PresentedPublished)
+-                .in_set(frame::ClientSet::Present),
++            (
++                update
++                    // Before the Minecraft world, which leaves a view it did
++                    // not turn on alone.
++                    .before(render_anim::minecraft_world::MinecraftWorldUpdate)
++                    .after(frame::PresentedPublished)
++                    .in_set(frame::ClientSet::Present),
++                place_soldiers.after(update).in_set(frame::ClientSet::Present),
++            ),
+         );
+     }
+ }
+@@ -208,6 +215,8 @@ pub struct FlatFloor {
+     /// The figures as bullets see them, by `sim::voxel` mob key (the index): pawn id, whether
+     /// it has a head to hit, and its block-space box.
+     targets: Vec<(String, bool, [f64; 6])>,
++    /// The pawns drawn as MW2 soldiers, so not as figures.
++    soldiers: std::collections::HashSet<String>,
+     /// RimWorld's terrain the blocks are built from, and the link's revision of it.
+     terrain: Option<Arc<Terrain>>,
+     terrain_revision: u64,
+@@ -461,7 +470,11 @@ fn update(
+     // Not the player's own colonist: that is the player.
+     let playing = floor.playing.as_deref();
+     view.entity_meshes[0] = figure_mesh(
+-        floor.figures.iter().filter(|(id, _)| Some(id.as_str()) != playing).map(|(_, figure)| figure),
++        floor
++            .figures
++            .iter()
++            .filter(|(id, _)| Some(id.as_str()) != playing && !floor.soldiers.contains(id.as_str()))
++            .map(|(_, figure)| figure),
+         &floor.tracers,
+     );
+ 
+@@ -1445,6 +1458,220 @@ fn environment(eye: [f64; 3], forward: Vec3, aspect: f32, size: f32) -> [[f32; 4
+     ]
+ }
+ 
++/// MW2's animations a soldier plays, by name: the first the map has of each list, else the
++/// first whose name has all of the words.
++const STAND_CLIPS: (&[&str], &[&str]) = (&["pb_stand_alert", "pb_stand_alert_pistol", "pb_stand_idle"], &["pb_stand"]);
++const RUN_CLIPS: (&[&str], &[&str]) =
++    (&["pb_combatrun_forward_loop", "pb_run_fast", "pb_run_forward", "pb_sprint"], &["pb_", "run", "forward"]);
++const PRONE_CLIPS: (&[&str], &[&str]) = (&["pb_prone_aim", "pb_prone_hold", "pb_prone_crawl"], &["pb_prone"]);
++/// Blocks a second above which a soldier runs.
++const RUN_FROM: f32 = 0.6;
++
++/// One animation: its name and how much of it plays a second.
++#[derive(Clone, Debug, PartialEq)]
++struct Clip {
++    name: String,
++    frequency: f32,
++}
++
++/// What a soldier is doing.
++#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
++enum Action {
++    Stand,
++    Run,
++    Prone,
++}
++
++/// A pawn's MW2 soldier: the model entity, and where it stood last frame.
++struct Soldier {
++    entity: Entity,
++    last: [f32; 2],
++}
++
++/// The soldiers on the floor and what they play. Every soldier doing the same thing is at
++/// the same point of its animation, so they share one pose.
++#[derive(Default)]
++struct Soldiers {
++    by_pawn: HashMap<String, Soldier>,
++    next_id: u32,
++    /// The animations, once looked up; `None` inside when the map has no standing one.
++    clips: Option<Option<HashMap<Action, Clip>>>,
++    times: HashMap<Action, (f32, i16)>,
++    revision: u32,
++}
++
++/// The first animation `names` has of `wanted`'s list, else the first with all its words
++/// that is not for a pistol (they hold one hand up).
++fn pick_clip<'a>(names: &[&'a str], (exact, words): (&[&str], &[&str])) -> Option<&'a str> {
++    exact.iter().find_map(|want| names.iter().copied().find(|name| name == want)).or_else(|| {
++        names.iter().copied().find(|name| !name.contains("pistol") && words.iter().all(|word| name.contains(word)))
++    })
++}
++
++/// The soldier model and head for a side, if the map has them: the other side's for raiders.
++fn soldier_kit(bodies: &assets::PreparedBodies, hostile: bool) -> Option<(String, Option<String>)> {
++    let kit = bodies.0.kits().kit(hostile)?;
++    Some((kit.body.clone(), kit.head.clone()))
++}
++
++/// A soldier's model and pose: `body` with `head` on its neck, playing `clip` at `time`.
++fn soldier_state(body: &str, head: Option<&str>, clip: &str, time: f32, revision: u32) -> xmodel_runtime::DObjSemanticState {
++    let mut state = xmodel_runtime::DObjSemanticState::one_leaf(body.to_owned(), clip.to_owned(), 1, revision, time);
++    if let Some(head) = head {
++        state.composition.models.push(xmodel_runtime::DObjModelDescriptor {
++            model: head.to_owned(),
++            parent_model: Some(0),
++            attach_tag: Some(xmodel_runtime::TP_HEAD_ATTACH_TAG.to_owned()),
++            ignore_collision: true,
++        });
++    }
++    state
++}
++
++/// Where a soldier stands and faces: on the floor's top at its figure, turned as RimWorld's
++/// `rot` (clockwise from north), where MW2's yaw 0 is east and grows anticlockwise.
++fn soldier_transform(origin: [f64; 3], figure: &Figure) -> Transform {
++    let at = sim::voxel::to_map(origin, [f64::from(figure.x), 0.0, f64::from(figure.z)]);
++    Transform::from_translation(Vec3::from_array(at)).with_rotation(Quat::from_rotation_z((90.0 - figure.yaw).to_radians()))
++}
++
++/// Puts an MW2 soldier on each person on the floor (not the one the player plays), moves it
++/// with them, and takes it away when they go.
++#[allow(clippy::too_many_arguments)]
++fn place_soldiers(
++    mut commands: Commands,
++    time: Res<Time>,
++    mut floor: ResMut<FlatFloor>,
++    bodies: Option<Res<assets::PreparedBodies>>,
++    xanims: Option<Res<assets::PreparedXAnims>>,
++    catalog: Option<Res<asset_world::MapXModelSceneCatalog>>,
++    mut models: Query<(&mut render_scene::WorldScriptModelInstance, &mut Transform)>,
++    mut soldiers: Local<Soldiers>,
++) {
++    let ready = floor.active && bodies.is_some() && xanims.is_some() && catalog.is_some();
++    if !ready {
++        for (_, soldier) in soldiers.by_pawn.drain() {
++            commands.entity(soldier.entity).despawn();
++        }
++        // A new match may have other animations.
++        soldiers.clips = None;
++        floor.soldiers.clear();
++        return;
++    }
++    let (Some(bodies), Some(xanims), Some(catalog)) = (bodies, xanims, catalog) else {
++        return;
++    };
++    let clips = soldiers
++        .clips
++        .get_or_insert_with(|| {
++            let names: Vec<&str> = xanims.0.names().collect();
++            let mut clips = HashMap::new();
++            for (action, wanted) in [(Action::Stand, STAND_CLIPS), (Action::Run, RUN_CLIPS), (Action::Prone, PRONE_CLIPS)] {
++                let Some(name) = pick_clip(&names, wanted) else { continue };
++                let Some(clip) = xanims.0.clip(asset_core::AssetNamespace::Iw4, name) else { continue };
++                let frames = f32::from(clip.numframes.saturating_sub(1).max(1));
++                clips.insert(action, Clip { name: name.to_owned(), frequency: clip.framerate / frames });
++            }
++            let player: Vec<&&str> = names.iter().filter(|name| name.starts_with("pb_")).collect();
++            diag::info!(Zone, "rimworld: soldier animations {clips:?}, from {} player animations: {player:?}", player.len());
++            clips.contains_key(&Action::Stand).then_some(clips)
++        })
++        .clone();
++    let Some(clips) = clips else {
++        floor.soldiers.clear();
++        return;
++    };
++    // Every soldier's animations, a step on.
++    let dt = time.delta_secs();
++    soldiers.revision = soldiers.revision.wrapping_add(1);
++    for (action, clip) in &clips {
++        let (t, cycles) = soldiers.times.get(action).copied().unwrap_or((0.0, 0));
++        let next = anim_iw4::advance_leaf_time(t, cycles, 1.0, clip.frequency, dt, *action != Action::Prone);
++        soldiers.times.insert(*action, next);
++    }
++    let has = |name: &str| matches!(catalog.get_name(name), Some(asset_world::MapXModelSceneAsset::Iw4(_)));
++    let playing = floor.playing.clone();
++    let mut shown = std::collections::HashSet::new();
++    let origin = floor.origin;
++    for (id, figure) in &floor.figures {
++        if figure.kind != Kind::Humanlike || playing.as_deref() == Some(id.as_str()) {
++            continue;
++        }
++        let Some((body, head)) = soldier_kit(&bodies, figure.side == SideColour::Hostile) else { continue };
++        if !has(&body) {
++            continue;
++        }
++        let head = head.filter(|head| has(head));
++        let transform = soldier_transform(origin, figure);
++        let moved = soldiers
++            .by_pawn
++            .get(id)
++            .map_or(0.0, |soldier| Vec2::from(soldier.last).distance(Vec2::new(figure.x, figure.z)));
++        let speed = if dt > 0.0 { moved / dt } else { 0.0 };
++        let action = match () {
++            _ if figure.downed => Action::Prone,
++            _ if speed > RUN_FROM => Action::Run,
++            _ => Action::Stand,
++        };
++        let action = if clips.contains_key(&action) { action } else { Action::Stand };
++        let clip = &clips[&action];
++        let (anim_time, _) = soldiers.times.get(&action).copied().unwrap_or_default();
++        let state = soldier_state(&body, head.as_deref(), &clip.name, anim_time, soldiers.revision);
++        let model = asset_world::MapXModelAssetKey(body.clone());
++        let [x, y, z] = transform.translation.to_array();
++        let lighting_origin = [x, y, z + 40.0];
++        let existing = soldiers.by_pawn.get(id).map(|soldier| soldier.entity);
++        match existing.and_then(|entity| models.get_mut(entity).ok()) {
++            Some((mut instance, mut place)) => {
++                *place = transform;
++                instance.transform = transform;
++                instance.current_model = model;
++                instance.dobj_state = state;
++                instance.lighting_origin = lighting_origin;
++            }
++            None => {
++                let number = soldiers.next_id;
++                soldiers.next_id = soldiers.next_id.wrapping_add(1);
++                let model_id = render_anim::occupancy::script_model::CLIENT_MODEL_IDS.start
++                    + number % render_anim::occupancy::script_model::CLIENT_MODEL_IDS.len() as u32;
++                let entity = commands
++                    .spawn((
++                        render_anim::occupancy::script_model::ClientSceneModel { id: model_id },
++                        transform,
++                        Visibility::Inherited,
++                        render_scene::WorldScriptModelInstance {
++                            id: asset_world::ScriptModelId::from_source_ordinal(model_id),
++                            authority_owner: None,
++                            current_model: model,
++                            transform,
++                            lighting_origin,
++                            dobj_state: state,
++                            metadata: asset_world::ScriptModelMetadata::default(),
++                            gentity_number: None,
++                        },
++                    ))
++                    .id();
++                if let Some(old) = existing {
++                    commands.entity(old).try_despawn();
++                }
++                soldiers.by_pawn.insert(id.clone(), Soldier { entity, last: [figure.x, figure.z] });
++            }
++        }
++        if let Some(soldier) = soldiers.by_pawn.get_mut(id) {
++            soldier.last = [figure.x, figure.z];
++        }
++        shown.insert(id.clone());
++    }
++    soldiers.by_pawn.retain(|id, soldier| {
++        let keep = shown.contains(id);
++        if !keep {
++            commands.entity(soldier.entity).try_despawn();
++        }
++        keep
++    });
++    floor.soldiers = shown;
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+@@ -1650,6 +1877,40 @@ mod tests {
+         assert!((top - 1.81).abs() < 1e-3);
+     }
+ 
++    #[test]
++    fn soldiers_pick_mw2_animations_by_name() {
++        let names = ["pb_stand_alert_pistol", "pb_combatrun_forward_loop_pistol", "pb_run_forward_x", "pb_prone_crawl", "pb_stand_alert"];
++        assert_eq!(pick_clip(&names, STAND_CLIPS), Some("pb_stand_alert"), "the first wanted, wherever it is");
++        assert_eq!(pick_clip(&names, RUN_CLIPS), Some("pb_run_forward_x"), "else one with every word");
++        assert_eq!(pick_clip(&names, PRONE_CLIPS), Some("pb_prone_crawl"));
++        assert_eq!(pick_clip(&["pt_stand"], STAND_CLIPS), None);
++    }
++
++    #[test]
++    fn a_soldier_stands_on_its_cell_facing_as_rimworld_says() {
++        let figure = figure_of(&pawn("a", 10.5, 240.5), 250);
++        let floor = FlatFloor { size: 250, origin: [125.0, 0.0, 125.0], ..default() };
++        let transform = soldier_transform(floor.origin, &figure);
++        let [x, y, z] = floor.rimworld_to_map(10.5, 240.5);
++        assert!(transform.translation.distance(Vec3::new(x, y, z)) < 1e-3, "{transform:?}");
++        // RimWorld rot 90 is east, MW2's yaw 0: the model's forward (x) points east.
++        let forward = transform.rotation * Vec3::X;
++        assert!(forward.distance(Vec3::X) < 1e-4, "{forward}");
++        let north = Figure { yaw: 0.0, ..figure };
++        assert!((soldier_transform(floor.origin, &north).rotation * Vec3::X).distance(Vec3::Y) < 1e-4, "north is +y");
++    }
++
++    #[test]
++    fn a_soldier_wears_its_head_on_its_neck() {
++        let state = soldier_state("mp_body_a", Some("head_a"), "pb_stand_alert", 0.25, 7);
++        let models = &state.composition.models;
++        assert_eq!((models[0].model.as_str(), models[1].model.as_str()), ("mp_body_a", "head_a"));
++        assert_eq!((models[1].parent_model, models[1].attach_tag.as_deref()), (Some(0), Some("j_spine4")));
++        let leaf = &state.tree.as_ref().unwrap().nodes[0];
++        assert_eq!((leaf.clip.as_deref(), leaf.state.time), (Some("pb_stand_alert"), 0.25));
++        assert_eq!(soldier_state("mp_body_a", None, "pb_stand_alert", 0.25, 7).composition.models.len(), 1);
++    }
++
+     #[test]
+     fn a_missed_bullet_stops_at_the_first_wall() {
+         // A wall beside the shooter, which they lean past, and one further on.

@@ -1,0 +1,19 @@
+diff --git a/crates/rimworld_world/src/rimview.rs b/crates/rimworld_world/src/rimview.rs
+index 941f051..e89b9dc 100644
+--- a/crates/rimworld_world/src/rimview.rs
++++ b/crates/rimworld_world/src/rimview.rs
+@@ -184,9 +184,13 @@ pub(crate) fn tab_to_rimworld(
+         println!("[rimworld] Tab: RimWorld did not say which window is its own");
+         return;
+     };
++    // RimWorld hears first that the player asked for it (M17): while it is the minimap it
++    // hands the focus straight back to MW2 otherwise.
++    let own = rimworld_bridge::OWN_WINDOW.load(std::sync::atomic::Ordering::Relaxed);
++    let told = own != 0 && outbox.as_deref().is_some_and(|outbox| outbox.send(&BridgeMessage::RimworldShown { back: own.to_string() }));
+     match window::bring_up(rimworld) {
+         Some(back) => {
+-            if let Some(outbox) = outbox {
++            if !told && let Some(outbox) = outbox {
+                 outbox.send(&BridgeMessage::RimworldShown { back: back.to_string() });
+             }
+         }

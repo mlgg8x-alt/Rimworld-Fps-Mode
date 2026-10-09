@@ -1,0 +1,128 @@
+diff --git a/crates/rimworld_world/src/lib.rs b/crates/rimworld_world/src/lib.rs
+index e0252fc..798ed88 100644
+--- a/crates/rimworld_world/src/lib.rs
++++ b/crates/rimworld_world/src/lib.rs
+@@ -19,7 +19,8 @@
+ //! map edge), the player is put back on them.
+ //!
+ //! Every bullet RimWorld fires on that map flies across the floor as a tracer,
+-//! at the bullet's own speed, from the gun to where it lands.
++//! at the bullet's own speed, from the gun to where it lands. A miss stops at the
++//! first wall or rock in its way, as RimWorld's bullets do.
+ //!
+ //! The player holds the MW2 version of their colonist's gun, or nothing. The
+ //! figures are targets: each of the player's bullets goes back to RimWorld as
+@@ -129,6 +130,8 @@ const TRACER_LENGTH: f32 = 2.5;
+ const TRACER_HALF_WIDTH: f32 = 0.035;
+ const TRACER_SPEED: f32 = 60.0;
+ const MAX_TRACERS: usize = 256;
++/// Blocks between the points a missed bullet's path is checked at for walls.
++const TRACER_STEP: f32 = 0.05;
+ /// Seconds between tries at handing the player their colonist's gun.
+ const ARM_SECONDS: f32 = 0.5;
+ /// How far, in blocks, a bullet's start may be from the player's eye and still be theirs.
+@@ -199,14 +202,15 @@ struct Tracer {
+ }
+ 
+ impl Tracer {
+-    fn new(shot: &rimworld_bridge::Shot, size: i32) -> Self {
+-        let block = |[x, y, z]: [f32; 3]| Vec3::new(x, y, size as f32 - z);
+-        Self {
+-            from: block(shot.from),
+-            to: block(shot.to),
+-            speed: shot.speed.unwrap_or(TRACER_SPEED).clamp(10.0, 500.0),
+-            flown: 0.0,
++    fn new(shot: &rimworld_bridge::Shot, lay: Lay<'_>) -> Self {
++        let block = |[x, y, z]: [f32; 3]| Vec3::new(x, y, lay.size as f32 - z);
++        let from = block(shot.from);
++        let mut to = block(shot.to);
++        // RimWorld only lands a hit along a clear line; a miss flies on until something stops it.
++        if !shot.hit {
++            to = first_wall(lay, from, to).unwrap_or(to);
+         }
++        Self { from, to, speed: shot.speed.unwrap_or(TRACER_SPEED).clamp(10.0, 500.0), flown: 0.0 }
+     }
+ 
+     /// The part of the path the tracer covers now, tail then head, or `None` once it has landed.
+@@ -423,11 +427,9 @@ fn update(
+     let size = floor.size;
+     follow_pawns(&mut floor.figures, pawns, size, time.delta_secs());
+     // RimWorld's bullets, as tracers.
+-    for shot in &shots {
+-        if floor.tracers.len() < MAX_TRACERS {
+-            floor.tracers.push(Tracer::new(shot, size));
+-        }
+-    }
++    let room = MAX_TRACERS.saturating_sub(floor.tracers.len());
++    let fired: Vec<Tracer> = shots.iter().take(room).map(|shot| Tracer::new(shot, floor.lay())).collect();
++    floor.tracers.extend(fired);
+     fly_tracers(&mut floor.tracers, time.delta_secs());
+     // Every figure but the player's own is a target.
+     floor.targets = targets(&floor.figures, floor.playing.as_deref());
+@@ -1092,6 +1094,27 @@ fn follow_pawns(figures: &mut HashMap<String, Figure>, pawns: &[PawnState], size
+     }
+ }
+ 
++/// Where a bullet flying from `from` to `to` first meets a wall, rock or the floor's edge,
++/// if it does. As in RimWorld, a wall next to the shooter's cell does not stop it: a pawn
++/// leans out past a corner to shoot.
++fn first_wall(lay: Lay<'_>, from: Vec3, to: Vec3) -> Option<Vec3> {
++    let cell = |p: Vec3| (p.x.floor() as i32, p.z.floor() as i32);
++    let (start_x, start_z) = cell(from);
++    let length = from.distance(to);
++    let steps = (length / TRACER_STEP).ceil() as i32;
++    (1..=steps).map(|i| from.lerp(to, i as f32 / steps as f32)).find(|&p| {
++        let (x, z) = cell(p);
++        if (x - start_x).abs() <= 1 && (z - start_z).abs() <= 1 {
++            return false;
++        }
++        match lay.code(x, z) {
++            None => true,
++            Some(code @ (terrain::ROCK | terrain::WALL)) => column(code).contains(&(p.y.floor() as i32)),
++            Some(_) => false,
++        }
++    })
++}
++
+ /// Moves every tracer along its path and drops the ones that have landed.
+ fn fly_tracers(tracers: &mut Vec<Tracer>, dt: f32) {
+     for tracer in tracers.iter_mut() {
+@@ -1445,6 +1468,29 @@ mod tests {
+         assert!((top - 1.81).abs() < 1e-3);
+     }
+ 
++    #[test]
++    fn a_missed_bullet_stops_at_the_first_wall() {
++        // A wall beside the shooter, which they lean past, and one further on.
++        let terrain = Terrain { size: [10, 3], cells: b"..W...W...".repeat(3) };
++        let lay = Lay { size: 10, terrain: Some(&terrain) };
++        let shot = |hit| rimworld_bridge::Shot {
++            shooter: "Human2".into(),
++            from: [1.5, 1.3, 1.5],
++            to: [9.5, 1.0, 1.5],
++            hit,
++            speed: None,
++        };
++        let missed = Tracer::new(&shot(false), lay);
++        assert!((missed.to.x - 6.0).abs() < 0.06, "{}", missed.to);
++        assert_eq!(Tracer::new(&shot(true), lay).to.x, 9.5, "a hit flies all the way");
++        // Over cover, and out of the floor's edge.
++        let open = Terrain { size: [10, 3], cells: b"....c.....".repeat(3) };
++        let lay = Lay { size: 10, terrain: Some(&open) };
++        assert_eq!(Tracer::new(&shot(false), lay).to.x, 9.5);
++        let out = rimworld_bridge::Shot { to: [14.0, 1.0, 1.5], ..shot(false) };
++        assert!((Tracer::new(&out, lay).to.x - 10.0).abs() < 0.06);
++    }
++
+     #[test]
+     fn a_tracer_flies_from_the_gun_to_where_it_lands() {
+         let shot = rimworld_bridge::Shot {
+@@ -1454,7 +1500,7 @@ mod tests {
+             hit: false,
+             speed: Some(40.0),
+         };
+-        let mut tracers = vec![Tracer::new(&shot, 250)];
++        let mut tracers = vec![Tracer::new(&shot, Lay { size: 250, terrain: None })];
+         assert_eq!(tracers[0].from, Vec3::new(10.0, 1.3, 10.0), "RimWorld z 240 is block z 10");
+         fly_tracers(&mut tracers, 0.25);
+         let (tail, head) = tracers[0].streak().unwrap();

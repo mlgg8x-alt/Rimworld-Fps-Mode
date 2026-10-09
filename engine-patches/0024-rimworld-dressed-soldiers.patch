@@ -1,0 +1,1026 @@
+diff --git a/crates/asset_world/src/model_mesh.rs b/crates/asset_world/src/model_mesh.rs
+index 27193d0..97230f4 100644
+--- a/crates/asset_world/src/model_mesh.rs
++++ b/crates/asset_world/src/model_mesh.rs
+@@ -357,6 +357,10 @@ pub struct MapXModelSceneCatalog {
+ 
+     surface_materials: BTreeMap<MapXModelAssetKey, Vec<Option<crate::MaterialIndex>>>,
+     resolved: bool,
++
++    /// Models that are another model under a new name wearing other materials (RimWorld's
++    /// dressed soldiers): for each, which walk-local material becomes which.
++    material_swaps: BTreeMap<MapXModelAssetKey, Vec<(usize, usize)>>,
+ }
+ 
+ #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+@@ -400,7 +404,12 @@ impl MapXModelSceneCatalog {
+                     row.push(None);
+                     continue;
+                 };
+-                match walk_local_ids.get(local.get()).copied().flatten() {
++                let local = self
++                    .material_swaps
++                    .get(key)
++                    .and_then(|swaps| swaps.iter().find(|(from, _)| *from == local.get()))
++                    .map_or(local.get(), |(_, to)| *to);
++                match walk_local_ids.get(local).copied().flatten() {
+                     Some(order) => {
+                         census.bound += 1;
+                         row.push(Some(crate::MaterialIndex::from_order(order)));
+@@ -532,6 +541,17 @@ impl MapXModelSceneCatalog {
+         true
+     }
+ 
++    /// `name`, a copy of model `of` (sharing its geometry) whose surfaces wear other
++    /// materials: each walk-local material `from` in `swaps` becomes `to`. False when `of`
++    /// is not a model here.
++    pub fn retexture(&mut self, name: &str, of: &str, swaps: Vec<(usize, usize)>) -> bool {
++        if !self.alias(name, of) {
++            return false;
++        }
++        self.material_swaps.insert(MapXModelAssetKey(name.to_owned()), swaps);
++        true
++    }
++
+     pub fn zone_of(&self, index: usize) -> ZoneOwner {
+         self.zones.get(index).copied().unwrap_or_default()
+     }
+diff --git a/crates/assets/src/lib.rs b/crates/assets/src/lib.rs
+index bda74e7..118d10d 100644
+--- a/crates/assets/src/lib.rs
++++ b/crates/assets/src/lib.rs
+@@ -13,6 +13,7 @@ mod map_load_process;
+ mod map_scripts;
+ mod match_load;
+ pub mod plugin;
++pub mod rimworld_soldiers;
+ pub mod prepared;
+ pub mod session_load;
+ mod teardown;
+diff --git a/crates/assets/src/rimworld_soldiers.rs b/crates/assets/src/rimworld_soldiers.rs
+new file mode 100644
+index 0000000..ca20b86
+--- /dev/null
++++ b/crates/assets/src/rimworld_soldiers.rs
+@@ -0,0 +1,351 @@
++//! RimWorld x MW2: soldiers that wear RimWorld people's colours.
++//!
++//! On the RimWorld floor each soldier kit's body and head get [`SLOTS`] copies sharing their
++//! geometry ([`asset_world::MapXModelSceneCatalog::retexture`]), each wearing copies of the
++//! model's materials whose colour map is a picture of its own. The game repaints a slot's
++//! pictures for the person it dresses (`rimworld_world`), by name in
++//! [`crate::image_handles::RuntimeImageHandles`]. [`soldier_slots`] says what was made and
++//! where each picture came from.
++use std::sync::{Arc, Mutex};
++
++use asset_core::AssetRef;
++use asset_material::{AuthoredImage, MaterialCatalog};
++use asset_world::{MapXModelSceneAsset, MapXModelSceneCatalog};
++use bevy::{
++    asset::RenderAssetUsages,
++    prelude::Image,
++    render::render_resource::{Extent3d, TextureDimension, TextureFormat},
++};
++
++/// Soldiers that can each be dressed differently at once.
++pub const SLOTS: usize = 24;
++/// The colour map semantic.
++const COLOR_MAP: u8 = 2;
++/// Labels are this many texels square.
++pub const LABEL_SIZE: u32 = 128;
++
++/// What part of the body a texel of a soldier's picture covers.
++#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
++#[repr(u8)]
++pub enum BodyPart {
++    /// No surface of this picture's material covers it.
++    None = 0,
++    Head = 1,
++    Torso = 2,
++    Arms = 3,
++    Hands = 4,
++    Legs = 5,
++    Feet = 6,
++}
++
++impl BodyPart {
++    pub fn from_u8(value: u8) -> Self {
++        match value {
++            1 => Self::Head,
++            2 => Self::Torso,
++            3 => Self::Arms,
++            4 => Self::Hands,
++            5 => Self::Legs,
++            6 => Self::Feet,
++            _ => Self::None,
++        }
++    }
++
++    /// The part a bone moves, by MW2's bone names (`j_spineupper`, `j_knee_le`, ...).
++    pub fn of_bone(name: &str) -> Self {
++        let name = name.to_ascii_lowercase();
++        let has = |words: &[&str]| words.iter().any(|word| name.contains(word));
++        if has(&["head", "neck", "helmet", "jaw", "brow", "cheek", "eye", "lip", "nose", "ear", "mouth"]) {
++            Self::Head
++        } else if has(&["wrist", "finger", "thumb", "index", "pinky", "ring", "palm", "mid_"]) {
++            Self::Hands
++        } else if has(&["shoulder", "elbow", "clavicle", "bicep", "arm"]) {
++            Self::Arms
++        } else if has(&["ankle", "ball", "toe", "foot"]) {
++            Self::Feet
++        } else if has(&["hip", "knee", "pelvis", "mainroot", "thigh", "leg"]) {
++            Self::Legs
++        } else {
++            Self::Torso
++        }
++    }
++}
++
++/// One colour map of a soldier model that slots repaint.
++#[derive(Clone, Debug)]
++pub struct SlotSource {
++    /// The model (body or head) whose material it is.
++    pub model: String,
++    /// The material's name.
++    pub material: String,
++    /// The original colour map's name, to decode from the game's archives when
++    /// `rgba` is none.
++    pub image: String,
++    /// The original picture, when it came inside the zone.
++    pub rgba: Option<Arc<(u32, u32, Vec<u8>)>>,
++    /// [`BodyPart`]s, [`LABEL_SIZE`] square, row by row from the top: which part each
++    /// texel of the picture covers, from the bones its surfaces' vertices follow.
++    pub parts: Arc<Vec<u8>>,
++    /// On a head model.
++    pub head: bool,
++}
++
++/// The dressed soldier slots of the loaded match.
++#[derive(Clone, Debug, Default)]
++pub struct SoldierSlots {
++    pub slots: usize,
++    /// Every colour map each slot repaints.
++    pub sources: Vec<SlotSource>,
++}
++
++impl SoldierSlots {
++    /// Whether slot copies of `model` exist.
++    pub fn dresses(&self, model: &str) -> bool {
++        self.sources.iter().any(|source| source.model == model)
++    }
++}
++
++/// The name of slot `slot`'s copy of `model`.
++pub fn slot_model(slot: usize, model: &str) -> String {
++    format!("rwmw2_slot{slot}/{model}")
++}
++
++/// The name of slot `slot`'s picture for `source`.
++pub fn slot_image(slot: usize, source: &SlotSource) -> String {
++    format!("rwmw2_slot{slot}/{}/{}", source.model, source.material)
++}
++
++static SLOTS_NOW: Mutex<Option<Arc<SoldierSlots>>> = Mutex::new(None);
++
++/// What [`install`] made for the loaded match, if it made anything.
++pub fn soldier_slots() -> Option<Arc<SoldierSlots>> {
++    SLOTS_NOW.lock().ok()?.clone()
++}
++
++/// Makes the slots: called while a RimWorld floor's materials are still being linked, after
++/// the scene models are in. Returns a line for the load report.
++pub(crate) fn install(global: &mut MaterialCatalog, scene: &mut MapXModelSceneCatalog) -> String {
++    if let Ok(mut now) = SLOTS_NOW.lock() {
++        *now = None;
++    }
++    let skel_of = |asset: &MapXModelSceneAsset| match asset {
++        MapXModelSceneAsset::Iw4(skel) => Some(skel.clone()),
++        _ => None,
++    };
++    let names: Vec<String> = scene
++        .iter()
++        .filter(|(key, asset)| {
++            skel_of(asset).is_some_and(|skel| {
++                !asset_model::is_body_model(&key.0) || asset_model::body_has_tp_attach_bones(&skel.bone_names)
++            })
++        })
++        .map(|(key, _)| key.0.clone())
++        .collect();
++    let kits = asset_model::soldier_kits(&names);
++    let mut models: Vec<(String, bool)> = Vec::new();
++    for kit in [&kits.allies, &kits.axis].into_iter().flatten() {
++        for (model, head) in std::iter::once((kit.body.clone(), false)).chain(kit.head.clone().map(|head| (head, true))) {
++            if !models.iter().any(|(known, _)| *known == model) {
++                models.push((model, head));
++            }
++        }
++    }
++    let mut sources = Vec::new();
++    let mut made = 0usize;
++    for (model, head) in models {
++        let Some(skel) = scene.get_name(&model).and_then(skel_of) else { continue };
++        // Each material with a colour map, once: (walk-local material, its image).
++        let mut materials: Vec<(usize, usize)> = Vec::new();
++        for local in skel.surface_materials.iter().flatten() {
++            let local = local.get();
++            if materials.iter().any(|(known, _)| *known == local) {
++                continue;
++            }
++            let image = global
++                .materials
++                .get(local)
++                .and_then(|material| material.textures.iter().find(|t| t.semantic == COLOR_MAP))
++                .and_then(|binding| binding.image);
++            if let Some(image) = image.filter(|image| *image < global.images.len()) {
++                materials.push((local, image));
++            }
++        }
++        if materials.is_empty() {
++            continue;
++        }
++        let first_source = sources.len();
++        for &(local, image) in &materials {
++            let original = &global.images[image];
++            let rgba = if !original.payload.is_empty() {
++                asset_material::decode_zone_image_rgba(
++                    u32::from(original.width),
++                    u32::from(original.height),
++                    original.format,
++                    &original.payload,
++                )
++                .ok()
++            } else {
++                original
++                    .decoded
++                    .as_deref()
++                    .and_then(|decoded| asset_material::decoded_image_top_level_rgba8(decoded).ok())
++            };
++            sources.push(SlotSource {
++                model: model.clone(),
++                material: global.materials[local].name.as_str().to_owned(),
++                image: original.name.as_str().to_owned(),
++                rgba: rgba.map(Arc::new),
++                parts: Arc::new(label_parts(&skel, local, head)),
++                head,
++            });
++        }
++        for slot in 0..SLOTS {
++            let mut swaps = Vec::with_capacity(materials.len());
++            for (offset, &(local, image)) in materials.iter().enumerate() {
++                let source = &sources[first_source + offset];
++                let original = global.images[image].clone();
++                let picture = AuthoredImage {
++                    name: AssetRef::Real(slot_image(slot, source)),
++                    semantic: COLOR_MAP,
++                    width: 4,
++                    height: 4,
++                    depth: 1,
++                    level_count: 1,
++                    decoded: Some(Arc::new(placeholder(source))),
++                    payload: Arc::new(Vec::new()),
++                    decoded_variant: None,
++                    decoded_by: None,
++                    pending_decode: None,
++                    common_owned: false,
++                    use_srgb_reads: true,
++                    ..original
++                };
++                let picture = global.link_image(picture);
++                let mut material = global.materials[local].clone();
++                material.name = AssetRef::Real(format!("rwmw2_slot{slot}/{}", source.material));
++                for binding in &mut material.textures {
++                    if binding.semantic == COLOR_MAP {
++                        binding.image = Some(picture);
++                    }
++                }
++                swaps.push((local, global.link_material(material)));
++            }
++            if scene.retexture(&slot_model(slot, &model), &model, swaps) {
++                made += 1;
++            }
++        }
++    }
++    let line = format!(
++        "rimworld: dressed soldier slots: {made} models, {} colour maps ({} decoded at load): {:?}",
++        sources.len(),
++        sources.iter().filter(|source| source.rgba.is_some()).count(),
++        sources.iter().map(|source| (&source.model, &source.material, &source.image)).collect::<Vec<_>>(),
++    );
++    diag::info!(World, "{line}");
++    if let Ok(mut now) = SLOTS_NOW.lock() {
++        *now = (!sources.is_empty()).then(|| Arc::new(SoldierSlots { slots: SLOTS, sources }));
++    }
++    line
++}
++
++/// A slot's picture until it is repainted: the original's mean colour, else grey.
++fn placeholder(source: &SlotSource) -> Image {
++    let mean = source.rgba.as_deref().map_or([128, 128, 128], |(_, _, pixels)| {
++        let mut sum = [0u64; 3];
++        let n = (pixels.len() / 4).max(1) as u64;
++        for pixel in pixels.chunks_exact(4) {
++            for i in 0..3 {
++                sum[i] += u64::from(pixel[i]);
++            }
++        }
++        sum.map(|total| (total / n) as u8)
++    });
++    let texels: Vec<u8> = (0..16).flat_map(|_| [mean[0], mean[1], mean[2], 255]).collect();
++    Image::new(
++        Extent3d { width: 4, height: 4, depth_or_array_layers: 1 },
++        TextureDimension::D2,
++        texels,
++        TextureFormat::Rgba8UnormSrgb,
++        RenderAssetUsages::RENDER_WORLD,
++    )
++}
++
++/// Which [`BodyPart`] each texel of `local`'s picture covers: every triangle of the surfaces
++/// wearing it, drawn into the picture's UV square, by the bone its vertices mostly follow.
++/// A head model's picture is all head.
++pub fn label_parts(skel: &asset_model::ModelSkel, local: usize, head: bool) -> Vec<u8> {
++    let size = LABEL_SIZE as usize;
++    let mut parts = vec![BodyPart::None as u8; size * size];
++    let vertex_part = |vertex: usize| -> BodyPart {
++        if head {
++            return BodyPart::Head;
++        }
++        skel.vert_skin
++            .get(vertex)
++            .and_then(|skin| skel.bone_names.get(usize::from(skin.bones[0])))
++            .map_or(BodyPart::Torso, |bone| BodyPart::of_bone(bone))
++    };
++    for (surface, material) in skel.surface_materials.iter().enumerate() {
++        if material.map(|material| material.get()) != Some(local) {
++            continue;
++        }
++        let Some(&(start, count)) = skel.surface_index_ranges.get(surface) else { continue };
++        let Some(indices) = skel.indices.get(start..start + count) else { continue };
++        for triangle in indices.chunks_exact(3) {
++            let corners: Vec<usize> = triangle.iter().map(|&i| i as usize).collect();
++            let Some(uvs) = corners.iter().map(|&v| skel.uvs.get(v).copied()).collect::<Option<Vec<_>>>() else {
++                continue;
++            };
++            // The part most of its corners are on.
++            let mut votes: Vec<BodyPart> = corners.iter().map(|&v| vertex_part(v)).collect();
++            votes.sort_by_key(|part| *part as u8);
++            let part = if votes[1] == votes[0] || votes[1] == votes[2] { votes[1] } else { votes[0] };
++            fill_triangle(&mut parts, size, &uvs, part as u8);
++        }
++    }
++    parts
++}
++
++/// Fills a triangle given in UVs (wrapped into the square by its first corner's tile).
++fn fill_triangle(parts: &mut [u8], size: usize, uvs: &[[f32; 2]], value: u8) {
++    let tile = [uvs[0][0].floor(), uvs[0][1].floor()];
++    let point = |uv: [f32; 2]| [(uv[0] - tile[0]) * size as f32, (uv[1] - tile[1]) * size as f32];
++    let [a, b, c] = [point(uvs[0]), point(uvs[1]), point(uvs[2])];
++    let area = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
++    let lo = |i: usize| a[i].min(b[i]).min(c[i]).floor().max(0.0) as usize;
++    let hi = |i: usize| (a[i].max(b[i]).max(c[i]).ceil() as usize).min(size);
++    let edge = |p: [f32; 2], q: [f32; 2], x: f32, y: f32| (q[0] - p[0]) * (y - p[1]) - (q[1] - p[1]) * (x - p[0]);
++    for y in lo(1)..hi(1) {
++        for x in lo(0)..hi(0) {
++            let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
++            let w = [edge(b, c, fx, fy), edge(c, a, fx, fy), edge(a, b, fx, fy)];
++            let inside = if area >= 0.0 { w.iter().all(|w| *w >= -0.5) } else { w.iter().all(|w| *w <= 0.5) };
++            if inside {
++                parts[y * size + x] = value;
++            }
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn bones_name_their_body_parts() {
++        assert_eq!(BodyPart::of_bone("j_head"), BodyPart::Head);
++        assert_eq!(BodyPart::of_bone("j_spineupper"), BodyPart::Torso);
++        assert_eq!(BodyPart::of_bone("j_elbow_le"), BodyPart::Arms);
++        assert_eq!(BodyPart::of_bone("j_wrist_ri"), BodyPart::Hands);
++        assert_eq!(BodyPart::of_bone("j_knee_ri"), BodyPart::Legs);
++        assert_eq!(BodyPart::of_bone("j_ankle_le"), BodyPart::Feet);
++    }
++
++    #[test]
++    fn a_triangle_fills_its_texels() {
++        let mut parts = vec![0u8; 16];
++        fill_triangle(&mut parts, 4, &[[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]], 5);
++        assert_eq!(parts[0], 5);
++        assert_eq!(parts[15], 0, "the far corner is outside");
++    }
++}
+diff --git a/crates/assets/src/session_load/match_walk.rs b/crates/assets/src/session_load/match_walk.rs
+index b05b26e..f94afdc 100644
+--- a/crates/assets/src/session_load/match_walk.rs
++++ b/crates/assets/src/session_load/match_walk.rs
+@@ -394,6 +394,7 @@ pub(super) async fn walk_prepared_match(
+     let mut global = materials;
+     let iw5_linked = global.absorb_asset_population_host_materials_win(iw5_materials);
+     let provisional_map_ids: Vec<usize> = (0..global.materials.len()).collect();
++    let provisional_map_ids_end = provisional_map_ids.len();
+     if iw5_mat_n > 0 {
+         iw5_scene_models.remap_walk_materials(&iw5_linked);
+     }
+@@ -418,6 +419,10 @@ pub(super) async fn walk_prepared_match(
+     world
+         .map_xmodel_scene_assets
+         .absorb_captured(common_scene_models);
++    // On the RimWorld floor, soldiers that can each wear a RimWorld person's colours.
++    if crate::minecraft_map::flat_load() {
++        report.push(crate::rimworld_soldiers::install(&mut global, &mut world.map_xmodel_scene_assets));
++    }
+     report.push(format!(
+         "iw5 leftover materials: donor={iw5_mat_n} linked={} pool={}",
+         iw5_linked.len(),
+@@ -437,8 +442,14 @@ pub(super) async fn walk_prepared_match(
+             shader_refs.n, shader_refs.real, shader_refs.reference,
+             decl_refs.n, decl_refs.real, decl_refs.reference,
+         ));
++    let global_len_before_bots = global.materials.len();
+     crate::bot_model::install_local_bot_materials(&mut global);
+     let (mut global, finalized_ids) = global.publish();
++    // Materials linked since (the RimWorld soldiers' copies) keep their places too.
++    let provisional_map_ids: Vec<usize> = provisional_map_ids
++        .into_iter()
++        .chain(provisional_map_ids_end..global_len_before_bots)
++        .collect();
+     let map_ids = provisional_map_ids
+         .into_iter()
+         .map(|id| finalized_ids.get(id).copied().flatten())
+diff --git a/crates/render_anim/src/occupancy/script_model.rs b/crates/render_anim/src/occupancy/script_model.rs
+index 9ef98cb..d28cf1e 100644
+--- a/crates/render_anim/src/occupancy/script_model.rs
++++ b/crates/render_anim/src/occupancy/script_model.rs
+@@ -638,7 +638,7 @@ fn pose_script_models(
+                     continue;
+                 };
+                 let skin_entries = slot.as_ref().map(|slot| slot.skin_entries).unwrap_or(&[]);
+-                let Some((surfaces, surface_materials)) = pose_script_dobj_with_materials(
++                let Some((surfaces, mut surface_materials)) = pose_script_dobj_with_materials(
+                     Some(&assets),
+                     &skels,
+                     &slot_dobj.dobj,
+@@ -648,6 +648,7 @@ fn pose_script_models(
+                 ) else {
+                     continue;
+                 };
++                materials_by_composed_name(&assets, &owner.dobj_state, &skels, &surfaces, &mut surface_materials);
+                 for (surface, authored) in surfaces.iter().zip(surface_materials.iter()) {
+                     if authored.is_none() {
+                         product.surface_material_unbound += 1;
+@@ -1170,6 +1171,26 @@ pub fn pose_script_dobj_with_materials(
+     Some((surfaces, materials))
+ }
+ 
++/// A model composed under another name than its geometry's (a retextured copy, see
++/// `MapXModelSceneCatalog::retexture`) wears that name's materials, not the original's.
++fn materials_by_composed_name(
++    catalog: &asset_world::MapXModelSceneCatalog,
++    state: &xmodel_runtime::DObjSemanticState,
++    skels: &[&asset_model::ModelSkel],
++    surfaces: &[PosedModelSurface],
++    materials: &mut [Option<assets::MaterialIndex>],
++) {
++    let renamed = |model: usize| {
++        let name = &state.composition.models.get(model)?.model;
++        (skels.get(model)?.name != *name).then(|| asset_world::MapXModelAssetKey(name.clone()))
++    };
++    for (surface, material) in surfaces.iter().zip(materials.iter_mut()) {
++        if let Some(key) = renamed(usize::from(surface.model)) {
++            *material = catalog.surface_material(&key, surface.surface_index);
++        }
++    }
++}
++
+ #[derive(Clone, Copy, Debug)]
+ pub struct DObjLodView {
+     pub origin: [f32; 3],
+diff --git a/crates/rimworld_bridge/src/lib.rs b/crates/rimworld_bridge/src/lib.rs
+index aa792bb..ee1096c 100644
+--- a/crates/rimworld_bridge/src/lib.rs
++++ b/crates/rimworld_bridge/src/lib.rs
+@@ -15,7 +15,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
+ 
+ use bevy::prelude::*;
+ use rwmw2_protocol::{DEFAULT_ADDR, Message, PROTOCOL_VERSION, Side};
+-pub use rwmw2_protocol::{BuildingState, ItemState, LootItem, LootKind, LootSource, Message as BridgeMessage, PawnState, PlantState, ShotResult, Stance, roof, terrain};
++pub use rwmw2_protocol::{BuildingState, ItemState, LookState, LootItem, LootKind, LootSource, Message as BridgeMessage, PawnState, PlantState, ShotResult, Stance, WearState, roof, terrain};
+ 
+ pub struct RimworldBridgePlugin;
+ 
+@@ -92,6 +92,10 @@ pub struct RimworldLink {
+     pub items: Option<Arc<Vec<ItemState>>>,
+     /// Counts `items` messages.
+     pub items_revision: u64,
++    /// How each person looks, by pawn id, from the latest `looks` (M7+).
++    pub looks: Option<Arc<std::collections::HashMap<String, LookState>>>,
++    /// Counts `looks` messages.
++    pub looks_revision: u64,
+ }
+ 
+ /// The roof over every cell, one [`roof`] code a cell in [`Terrain`]'s order, and how hilly
+@@ -425,6 +429,13 @@ fn drain_inbox(inbox: Res<RimworldInbox>, mut link: ResMut<RimworldLink>) {
+                 link.items = Some(Arc::new(items));
+                 link.items_revision += 1;
+             }
++            BridgeEvent::Received(Message::Looks { looks }) => {
++                if link.looks.is_none() {
++                    report(&format!("people's looks: {}", looks.len()));
++                }
++                link.looks = Some(Arc::new(looks.into_iter().map(|look| (look.id.clone(), look)).collect()));
++                link.looks_revision += 1;
++            }
+             // Messages for RimWorld, not for the engine.
+             BridgeEvent::Received(_) => {}
+         }
+diff --git a/crates/rimworld_world/src/dress.rs b/crates/rimworld_world/src/dress.rs
+new file mode 100644
+index 0000000..cb3e882
+--- /dev/null
++++ b/crates/rimworld_world/src/dress.rs
+@@ -0,0 +1,361 @@
++//! M7: MW2 soldiers in RimWorld people's colours.
++//!
++//! Each person RimWorld describes in `looks` gets one of the soldier slots the loader made
++//! ([`assets::rimworld_soldiers`]): a copy of the soldier kit whose colour maps are pictures
++//! of their own. A slot's pictures are the MW2 originals repainted part by part: skin where
++//! the original shows skin (face, hands, and anything bare), each body part in the colour
++//! of the outermost thing the person wears over it, as RimWorld draws it, keeping MW2's
++//! shading, folds and seams.
++use std::collections::HashMap;
++use std::sync::Arc;
++
++use assets::rimworld_soldiers::{BodyPart, LABEL_SIZE, SlotSource, SoldierSlots, slot_image};
++use bevy::asset::RenderAssetUsages;
++use bevy::prelude::*;
++use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
++use rimworld_bridge::{LookState, RimworldLink};
++
++use crate::FlatFloor;
++
++/// Slots repainted a frame, at most: a repaint goes through every texel of a soldier.
++const REPAINTS_PER_FRAME: usize = 2;
++/// Pictures larger than this a side are repainted at half size (or less) to keep it quick.
++const MAX_SIDE: u32 = 1024;
++
++/// The RimWorld body part groups that cover each part, most specific first.
++fn groups(part: BodyPart) -> &'static [&'static str] {
++    match part {
++        BodyPart::Head => &["FullHead", "UpperHead"],
++        BodyPart::Torso | BodyPart::None => &["Torso"],
++        BodyPart::Arms => &["Arms", "Shoulders"],
++        BodyPart::Hands => &["Hands"],
++        BodyPart::Legs => &["Legs"],
++        BodyPart::Feet => &["Feet"],
++    }
++}
++
++/// What a part of a person shows: worn colour, bare skin, or MW2's own (boots, when
++/// RimWorld has none).
++#[derive(Clone, Copy, Debug, PartialEq)]
++pub(crate) enum Cover {
++    Worn([u8; 3]),
++    Skin,
++    Original,
++}
++
++/// The colour of the outermost thing `look` wears over `part`, else what shows there.
++/// `colour_of` gives a worn thing's colour as RimWorld draws it (its picture's mean),
++/// falling back to its stated colour.
++pub(crate) fn cover(look: &LookState, part: BodyPart, colour_of: &dyn Fn(i32) -> Option<[u8; 3]>) -> Cover {
++    let worn = look
++        .wear
++        .iter()
++        .rev()
++        .find(|wear| wear.parts.iter().any(|group| groups(part).contains(&group.as_str())));
++    match worn {
++        Some(wear) => Cover::Worn(colour_of(wear.tex).unwrap_or(wear.color)),
++        None => match part {
++            // Under no hat: hair, or a bald head.
++            BodyPart::Head => look.hair.map_or(Cover::Skin, Cover::Worn),
++            BodyPart::Feet => Cover::Original,
++            _ => Cover::Skin,
++        },
++    }
++}
++
++fn luma(p: &[u8]) -> f32 {
++    (0.299 * f32::from(p[0]) + 0.587 * f32::from(p[1]) + 0.114 * f32::from(p[2])) / 255.0
++}
++
++/// Whether a texel looks like skin: warm, somewhat saturated, not dark.
++pub(crate) fn skin_like(p: &[u8]) -> bool {
++    let [r, g, b] = [f32::from(p[0]), f32::from(p[1]), f32::from(p[2])].map(|v| v / 255.0);
++    let max = r.max(g).max(b);
++    let min = r.min(g).min(b);
++    let saturation = if max > 0.0 { (max - min) / max } else { 0.0 };
++    r >= g && g >= b * 0.9 && max > 0.25 && (0.12..=0.7).contains(&saturation) && r - b > 0.06
++}
++
++/// `source` (RGBA, `width` by `height`) repainted for `look`: each texel's part from
++/// `parts` ([`LABEL_SIZE`] square), in its cover's colour times the texel's brightness
++/// over its part's mean, so MW2's shading stays. Skin shows where a head or hand texel
++/// looks like skin, and wherever nothing is worn.
++pub(crate) fn repaint(
++    width: u32,
++    height: u32,
++    source: &[u8],
++    parts: &[u8],
++    head_model: bool,
++    look: &LookState,
++    colour_of: &dyn Fn(i32) -> Option<[u8; 3]>,
++) -> Vec<u8> {
++    let part_at = |x: u32, y: u32| -> BodyPart {
++        let lx = (x * LABEL_SIZE / width.max(1)).min(LABEL_SIZE - 1);
++        let ly = (y * LABEL_SIZE / height.max(1)).min(LABEL_SIZE - 1);
++        match BodyPart::from_u8(parts.get((ly * LABEL_SIZE + lx) as usize).copied().unwrap_or(0)) {
++            BodyPart::None if head_model => BodyPart::Head,
++            BodyPart::None => BodyPart::Torso,
++            part => part,
++        }
++    };
++    let bare = |part: BodyPart, p: &[u8]| matches!(part, BodyPart::Head | BodyPart::Hands) && skin_like(p);
++    // Each kind of texel's mean brightness, so a repaint keeps the picture's shading
++    // around the new colour instead of darkening it.
++    let mut sums: HashMap<(u8, bool), (f32, u32)> = HashMap::new();
++    for y in 0..height {
++        for x in 0..width {
++            let i = ((y * width + x) * 4) as usize;
++            let Some(p) = source.get(i..i + 4) else { continue };
++            let part = part_at(x, y);
++            let entry = sums.entry((part as u8, bare(part, p))).or_default();
++            entry.0 += luma(p);
++            entry.1 += 1;
++        }
++    }
++    let means: HashMap<(u8, bool), f32> =
++        sums.into_iter().map(|(key, (sum, n))| (key, (sum / n.max(1) as f32).max(0.05))).collect();
++    let covers: HashMap<u8, Cover> = [BodyPart::Head, BodyPart::Torso, BodyPart::Arms, BodyPart::Hands, BodyPart::Legs, BodyPart::Feet]
++        .into_iter()
++        .map(|part| (part as u8, cover(look, part, colour_of)))
++        .collect();
++    let mut out = source.to_vec();
++    for y in 0..height {
++        for x in 0..width {
++            let i = ((y * width + x) * 4) as usize;
++            let Some(p) = source.get(i..i + 4) else { continue };
++            let part = part_at(x, y);
++            let skin = bare(part, p);
++            let colour = match (skin, covers.get(&(part as u8)).copied().unwrap_or(Cover::Original)) {
++                (true, _) | (false, Cover::Skin) => look.skin,
++                (false, Cover::Worn(colour)) => colour,
++                (false, Cover::Original) => continue,
++            };
++            let mean = means.get(&(part as u8, skin)).copied().unwrap_or(0.5);
++            let shade = (luma(p) / mean).clamp(0.35, 1.6);
++            for c in 0..3 {
++                out[i + c] = (f32::from(colour[c]) * shade).round().clamp(0.0, 255.0) as u8;
++            }
++        }
++    }
++    out
++}
++
++/// The mean colour of a picture's solid texels.
++pub(crate) fn solid_mean(rgba: &[u8]) -> Option<[u8; 3]> {
++    let mut sum = [0u64; 3];
++    let mut n = 0u64;
++    for p in rgba.chunks_exact(4).filter(|p| p[3] >= 128) {
++        for c in 0..3 {
++            sum[c] += u64::from(p[c]);
++        }
++        n += 1;
++    }
++    (n > 0).then(|| sum.map(|total| (total / n) as u8))
++}
++
++/// Halves a picture until its sides fit [`MAX_SIDE`].
++fn fit(width: u32, height: u32, rgba: Vec<u8>) -> (u32, u32, Vec<u8>) {
++    let (mut w, mut h, mut pixels) = (width, height, rgba);
++    while w.max(h) > MAX_SIDE && w > 1 && h > 1 {
++        let (nw, nh) = (w / 2, h / 2);
++        let mut next = vec![0u8; (nw * nh * 4) as usize];
++        for y in 0..nh {
++            for x in 0..nw {
++                for c in 0..4 {
++                    let at = |dx: u32, dy: u32| u32::from(pixels[(((y * 2 + dy) * w + x * 2 + dx) * 4 + c) as usize]);
++                    next[((y * nw + x) * 4 + c) as usize] = ((at(0, 0) + at(1, 0) + at(0, 1) + at(1, 1)) / 4) as u8;
++                }
++            }
++        }
++        (w, h, pixels) = (nw, nh, next);
++    }
++    (w, h, pixels)
++}
++
++/// Each MW2 original by image name, decoded once (`width, height, RGBA`); `None` when it
++/// could not be.
++type Originals = HashMap<String, Option<Arc<(u32, u32, Vec<u8>)>>>;
++
++/// What the dressing remembers between frames.
++#[derive(Default)]
++pub(crate) struct Wardrobe {
++    /// The image handles' generation the paint went on; a new match starts over.
++    generation: Option<String>,
++    /// What each slot was last painted for.
++    painted: HashMap<usize, String>,
++    /// Each MW2 original, decoded once; `None` when it could not be.
++    originals: Originals,
++    /// Each RimWorld apparel picture's mean colour.
++    apparel: HashMap<i32, Option<[u8; 3]>>,
++}
++
++/// A look's fingerprint, so a slot is repainted only when what it shows changed.
++fn fingerprint(look: &LookState) -> String {
++    format!("{:?}{:?}{:?}", look.skin, look.hair, look.wear.iter().map(|w| (&w.def, w.color, w.tex, &w.parts)).collect::<Vec<_>>())
++}
++
++/// Repaints the slots of people whose look changed (a few a frame).
++pub(crate) fn dress_soldiers(
++    floor: Res<FlatFloor>,
++    link: Option<Res<RimworldLink>>,
++    handles: Option<Res<assets::image_handles::RuntimeImageHandles>>,
++    mut images: ResMut<Assets<Image>>,
++    mut wardrobe: Local<Wardrobe>,
++) {
++    let (Some(link), Some(handles)) = (link, handles) else { return };
++    let Some(slots) = assets::rimworld_soldiers::soldier_slots() else { return };
++    let generation = format!("{:?}", handles.generation_id);
++    if wardrobe.generation.as_ref() != Some(&generation) {
++        wardrobe.painted.clear();
++        wardrobe.originals.clear();
++        wardrobe.generation = Some(generation);
++    }
++    let Some(looks) = link.looks.as_deref() else { return };
++    let textures = link.textures.clone();
++    let mut repaints = 0;
++    let mut dressed: Vec<(&String, &usize)> = floor.dress.iter().collect();
++    dressed.sort();
++    for (pawn, &slot) in dressed {
++        if repaints >= REPAINTS_PER_FRAME {
++            break;
++        }
++        let Some(look) = looks.get(pawn) else { continue };
++        let print = fingerprint(look);
++        if wardrobe.painted.get(&slot) == Some(&print) {
++            continue;
++        }
++        repaints += 1;
++        let Wardrobe { originals, apparel, .. } = &mut *wardrobe;
++        // Apparel pictures this look needs, read first.
++        for wear in &look.wear {
++            apparel.entry(wear.tex).or_insert_with(|| {
++                let textures = textures.as_ref()?;
++                let name = textures.names.get(usize::try_from(wear.tex).ok()?)?;
++                let picture = image::open(format!("{}/{name}.png", textures.dir)).ok()?.to_rgba8();
++                solid_mean(picture.as_raw())
++            });
++        }
++        let colour_of = |tex: i32| apparel.get(&tex).copied().flatten();
++        paint_slot(&slots, slot, look, &colour_of, originals, &handles, &mut images);
++        wardrobe.painted.insert(slot, print);
++    }
++}
++
++fn paint_slot(
++    slots: &SoldierSlots,
++    slot: usize,
++    look: &LookState,
++    colour_of: &dyn Fn(i32) -> Option<[u8; 3]>,
++    originals: &mut Originals,
++    handles: &assets::image_handles::RuntimeImageHandles,
++    images: &mut Assets<Image>,
++) {
++    for source in &slots.sources {
++        let Some(original) = original_of(source, originals) else { continue };
++        let name = slot_image(slot, source);
++        let Some(handle) = handles
++            .material_names
++            .iter()
++            .position(|known| *known == name || known.ends_with(&name))
++            .and_then(|index| handles.material_images.get(index)?.clone())
++        else {
++            diag::warn!(Zone, "rimworld: no picture {name} to dress a soldier in");
++            continue;
++        };
++        let (width, height, pixels) = &*original;
++        let painted = repaint(*width, *height, pixels, &source.parts, source.head, look, colour_of);
++        let image = Image::new(
++            Extent3d { width: *width, height: *height, depth_or_array_layers: 1 },
++            TextureDimension::D2,
++            painted,
++            TextureFormat::Rgba8UnormSrgb,
++            RenderAssetUsages::RENDER_WORLD,
++        );
++        let _ = images.insert(handle.id(), image);
++    }
++}
++
++/// The MW2 picture a slot source repaints, decoded once (from the zone at load, else from
++/// the game's archives by name).
++fn original_of(
++    source: &SlotSource,
++    originals: &mut Originals,
++) -> Option<Arc<(u32, u32, Vec<u8>)>> {
++    originals
++        .entry(source.image.clone())
++        .or_insert_with(|| {
++            let (width, height, rgba) = match source.rgba.as_deref() {
++                Some(decoded) => decoded.clone(),
++                None => {
++                    let games = asset_transport::games_root_from_env().ok()?;
++                    match asset_material::decode_ui_image(&games.0, &source.image) {
++                        Ok(Some(decoded)) => decoded,
++                        other => {
++                            diag::warn!(Zone, "rimworld: soldier picture {} could not be read: {other:?}", source.image);
++                            return None;
++                        }
++                    }
++                }
++            };
++            Some(Arc::new(fit(width, height, rgba)))
++        })
++        .clone()
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use rimworld_bridge::WearState;
++
++    fn wear(parts: &[&str], color: [u8; 3]) -> WearState {
++        WearState {
++            def: "Apparel".into(),
++            color,
++            tex: -1,
++            layer: "OnSkin".into(),
++            parts: parts.iter().map(|part| (*part).to_owned()).collect(),
++        }
++    }
++
++    fn look() -> LookState {
++        LookState {
++            id: "Human1".into(),
++            skin: [220, 180, 150],
++            hair: Some([40, 30, 20]),
++            wear: vec![wear(&["Torso", "Shoulders", "Arms"], [200, 0, 0]), wear(&["Legs"], [0, 0, 200]), wear(&["Torso"], [0, 200, 0])],
++        }
++    }
++
++    #[test]
++    fn the_outermost_cover_shows() {
++        let none = |_: i32| None;
++        assert_eq!(cover(&look(), BodyPart::Torso, &none), Cover::Worn([0, 200, 0]), "the jacket over the shirt");
++        assert_eq!(cover(&look(), BodyPart::Arms, &none), Cover::Worn([200, 0, 0]), "the shirt's sleeves");
++        assert_eq!(cover(&look(), BodyPart::Legs, &none), Cover::Worn([0, 0, 200]));
++        assert_eq!(cover(&look(), BodyPart::Hands, &none), Cover::Skin, "no gloves");
++        assert_eq!(cover(&look(), BodyPart::Head, &none), Cover::Worn([40, 30, 20]), "hair under no hat");
++        assert_eq!(cover(&look(), BodyPart::Feet, &none), Cover::Original);
++        assert_eq!(cover(&look(), BodyPart::Torso, &|_| Some([1, 2, 3])), Cover::Worn([1, 2, 3]), "as drawn");
++    }
++
++    #[test]
++    fn a_repaint_takes_the_cover_colour_and_keeps_shading() {
++        // Two torso texels of a 2 by 1 picture, one darker.
++        let source = [100, 100, 100, 255, 50, 50, 50, 255];
++        let parts = vec![BodyPart::Torso as u8; (LABEL_SIZE * LABEL_SIZE) as usize];
++        let out = repaint(2, 1, &source, &parts, false, &look(), &|_| None);
++        assert_eq!(&out[0..4], &[0, 255, 0, 255], "brighter than the mean");
++        assert!(out[5] < 200 && out[5] > 100, "darker stays darker: {}", out[5]);
++        assert_eq!(out[4], 0);
++    }
++
++    #[test]
++    fn skin_shows_on_hands_and_faces() {
++        assert!(skin_like(&[210, 160, 130, 255]));
++        assert!(!skin_like(&[90, 110, 70, 255]), "olive drab");
++        let source = [210, 160, 130, 255];
++        let parts = vec![BodyPart::Hands as u8; (LABEL_SIZE * LABEL_SIZE) as usize];
++        let out = repaint(1, 1, &source, &parts, false, &look(), &|_| None);
++        assert_eq!(&out[0..3], &[220, 180, 150]);
++    }
++}
+diff --git a/crates/rimworld_world/src/lib.rs b/crates/rimworld_world/src/lib.rs
+index df1be63..ffd82a6 100644
+--- a/crates/rimworld_world/src/lib.rs
++++ b/crates/rimworld_world/src/lib.rs
+@@ -60,6 +60,7 @@
+ //! (beds, shelves, tables, chairs, lamps, turrets and the rest) is a model of boxes made
+ //! for what it is, wearing its RimWorld picture: see [`detail`].
+ mod detail;
++mod dress;
+ 
+ use std::collections::HashMap;
+ use std::sync::Arc;
+@@ -238,6 +239,7 @@ impl Plugin for RimworldWorldPlugin {
+                     .after(frame::PresentedPublished)
+                     .in_set(frame::ClientSet::Present),
+                 place_soldiers.after(update).in_set(frame::ClientSet::Present),
++                dress::dress_soldiers.after(place_soldiers).in_set(frame::ClientSet::Present),
+                 place_plants.after(update).in_set(frame::ClientSet::Present),
+                 present_booms.after(update).in_set(frame::ClientSet::Present),
+                 sync_loot.after(update).in_set(frame::ClientSet::Present),
+@@ -349,6 +351,8 @@ pub struct FlatFloor {
+     targets: Vec<(String, bool, [f64; 6])>,
+     /// The pawns drawn as MW2 soldiers, so not as figures.
+     soldiers: std::collections::HashSet<String>,
++    /// The soldier slot dressing each person RimWorld described (`looks`), by pawn id.
++    dress: HashMap<String, usize>,
+     /// RimWorld's terrain the blocks are built from, and the link's revision of it.
+     terrain: Option<Arc<Terrain>>,
+     terrain_revision: u64,
+@@ -2624,6 +2628,7 @@ fn place_soldiers(
+     xanims: Option<Res<assets::PreparedXAnims>>,
+     catalog: Option<Res<asset_world::MapXModelSceneCatalog>>,
+     weapons: Option<Res<assets::PreparedWeapons>>,
++    link: Option<Res<RimworldLink>>,
+     mut models: Query<(&mut render_scene::WorldScriptModelInstance, &mut Transform)>,
+     mut soldiers: Local<Soldiers>,
+ ) {
+@@ -2671,6 +2676,18 @@ fn place_soldiers(
+     }
+     let has = |name: &str| matches!(catalog.get_name(name), Some(asset_world::MapXModelSceneAsset::Iw4(_)));
+     let playing = floor.playing.clone();
++    let slots = assets::rimworld_soldiers::soldier_slots();
++    let looks = link.as_deref().and_then(|link| link.looks.clone());
++    floor.dress = dress_slots(
++        &floor.dress,
++        floor
++            .figures
++            .iter()
++            .filter(|(id, figure)| figure.kind == Kind::Humanlike && playing.as_deref() != Some(id.as_str()))
++            .map(|(id, _)| id)
++            .filter(|id| looks.as_ref().is_some_and(|looks| looks.contains_key(*id))),
++        slots.as_ref().map_or(0, |slots| slots.slots),
++    );
+     let mut shown = std::collections::HashSet::new();
+     let origin = floor.origin;
+     for (id, figure) in &floor.figures {
+@@ -2682,6 +2699,16 @@ fn place_soldiers(
+             continue;
+         }
+         let head = head.filter(|head| has(head));
++        // Dressed as RimWorld has them, in their slot's copy of the kit.
++        let dressed = |model: String| match (floor.dress.get(id), slots.as_deref()) {
++            (Some(&slot), Some(slots)) if slots.dresses(&model) => {
++                let copy = assets::rimworld_soldiers::slot_model(slot, &model);
++                if has(&copy) { copy } else { model }
++            }
++            _ => model,
++        };
++        let body = dressed(body);
++        let head = head.map(dressed);
+         let gun = figure.gun.and_then(|name| {
+             let model = soldiers.guns.entry(name).or_insert_with(|| {
+                 let model = weapons.as_deref().and_then(|weapons| {
+@@ -2760,6 +2787,26 @@ fn place_soldiers(
+     floor.soldiers = shown;
+ }
+ 
++/// Which soldier slot dresses each of `people`: the one they had, else a free one, while
++/// there are `slots`; the rest wear the kit as it is.
++fn dress_slots<'a>(had: &HashMap<String, usize>, people: impl Iterator<Item = &'a String>, slots: usize) -> HashMap<String, usize> {
++    let mut people: Vec<&String> = people.collect();
++    people.sort();
++    let mut dress: HashMap<String, usize> = people
++        .iter()
++        .filter_map(|id| had.get(*id).filter(|slot| **slot < slots).map(|slot| ((*id).clone(), *slot)))
++        .collect();
++    let mut free = (0..slots).filter(|slot| !dress.values().any(|taken| taken == slot)).collect::<Vec<_>>().into_iter();
++    for id in people {
++        if dress.contains_key(id) {
++            continue;
++        }
++        let Some(slot) = free.next() else { break };
++        dress.insert(id.clone(), slot);
++    }
++    dress
++}
++
+ /// MW2 models for each RimWorld plant kind, from the stand-in map (Estate's forest has
+ /// pines, birches, oaks and bushes): any the map has, one picked per plant for variety,
+ /// standing this many blocks high when fully grown. A kind with none the map has borrows
+@@ -3292,6 +3339,18 @@ mod tests {
+         atlas.pixels.save(std::env::var("RWMW2_TEST_ATLAS").unwrap()).unwrap();
+     }
+ 
++    #[test]
++    fn people_keep_their_soldier_slot_while_there_are_slots() {
++        let ids: Vec<String> = ["A", "B", "C"].map(String::from).to_vec();
++        let first = dress_slots(&HashMap::new(), ids.iter(), 2);
++        assert_eq!(first.len(), 2, "two slots, three people");
++        assert_eq!(first["A"], 0);
++        // A leaves: C takes the free slot, B keeps theirs.
++        let next = dress_slots(&first, ids[1..].iter(), 2);
++        assert_eq!(next["B"], first["B"]);
++        assert_eq!(next["C"], 0);
++    }
++
+     #[test]
+     fn only_chunks_near_changed_cells_rebuild() {
+         let before = Terrain { size: [64, 64], cells: vec![b'.'; 64 * 64] };

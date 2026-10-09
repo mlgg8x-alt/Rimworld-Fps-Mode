@@ -1,0 +1,721 @@
+diff --git a/crates/frame/src/lib.rs b/crates/frame/src/lib.rs
+index c294f91..730b1c6 100644
+--- a/crates/frame/src/lib.rs
++++ b/crates/frame/src/lib.rs
+@@ -39,4 +39,4 @@ pub use skate::SkateMode;
+ pub mod minecraft_ui;
+ pub use minecraft_ui::{InventoryPuppet, McClick, McSlot, McStack, MinecraftUi};
+ pub mod rimworld_loot;
+-pub use rimworld_loot::{RimHold, RimLootClick, RimLootEntry, RimLootGroup, RimLootKind, RimLootUi};
++pub use rimworld_loot::{RimFx, RimFxShot, RimHold, RimLootClick, RimLootEntry, RimLootGroup, RimLootKind, RimLootUi};
+diff --git a/crates/frame/src/rimworld_loot.rs b/crates/frame/src/rimworld_loot.rs
+index 0f35065..de8813c 100644
+--- a/crates/frame/src/rimworld_loot.rs
++++ b/crates/frame/src/rimworld_loot.rs
+@@ -82,3 +82,25 @@ impl RimLootUi {
+ pub struct RimHold {
+     pub paused: bool,
+ }
++
++/// M20: RimWorld's effects shown with MW2's own (rimworld-mw2): fires, smoke and other gas,
++/// blasts, bullet strikes. The world that hears RimWorld (`rimworld_world`) says what to
++/// show, as lists of MW2 effect names to try in turn; the effects system (`render_frontend`)
++/// plays the first the game has.
++#[derive(Resource, Default)]
++pub struct RimFx {
++    /// Effects to play once, as they come: names to try, map point, and the way the
++    /// effect's forward points.
++    pub once: Vec<RimFxShot>,
++    /// Effects kept going while they are listed (a fire, a cloud of smoke), by a key
++    /// steady from frame to frame. One that ends on its own is started again.
++    pub held: std::collections::HashMap<u64, RimFxShot>,
++}
++
++/// One effect at a map point (inches), pointing `forward`.
++#[derive(Clone, Debug, PartialEq)]
++pub struct RimFxShot {
++    pub names: &'static [&'static str],
++    pub origin: [f32; 3],
++    pub forward: [f32; 3],
++}
+diff --git a/crates/render_frontend/src/adapters/fx/system.rs b/crates/render_frontend/src/adapters/fx/system.rs
+index b4e410f..77f0db0 100644
+--- a/crates/render_frontend/src/adapters/fx/system.rs
++++ b/crates/render_frontend/src/adapters/fx/system.rs
+@@ -100,6 +100,7 @@ impl FxSceneAccess<'_> {
+ pub(crate) fn register_combat_fx_systems(app: &mut App) {
+     app.add_message::<BulletHitFx>()
+         .init_resource::<render_fx::FxModelStaging>()
++        .init_resource::<frame::RimFx>()
+         .init_resource::<crate::assemble::drawsurf::GfxGlassMeshPlan>()
+         .init_resource::<crate::assemble::drawsurf::GlassTable>()
+         .add_systems(Update, latch_authority_load_hold.in_set(ClientSet::Load))
+@@ -131,7 +132,7 @@ pub(crate) fn register_combat_fx_systems(app: &mut App) {
+         )
+         .add_systems(
+             Update,
+-            (drain_bullet_hit_fx, drain_pellet_fx, present_tracker_light)
++            (drain_bullet_hit_fx, drain_pellet_fx, present_tracker_light, present_rim_fx)
+                 .chain()
+                 .after(render_anim::occupancy::fpv_present::publish_fpv_dobj_pose)
+                 .after(frame::WorkerCmdSet::SkinModel)
+@@ -151,6 +152,100 @@ pub(crate) fn register_combat_fx_systems(app: &mut App) {
+         .add_observer(melee_blood);
+ }
+ 
++/// M20 (rimworld-mw2): the effects `frame::RimFx` asks for, as they play.
++#[derive(Default)]
++struct RimFxPlaying {
++    /// Each kept effect, by its key: its handle, the name it plays, where, and when it began.
++    held: HashMap<u64, (u16, &'static str, [f32; 3], i32)>,
++    /// The name the game has for each list of names (by the list's address), `None` when it
++    /// has none of them.
++    chosen: HashMap<usize, Option<&'static str>>,
++}
++
++/// Milliseconds after which a kept effect that does not loop starts again.
++const RIM_FX_AGAIN_MS: i32 = 8000;
++
++/// M20 (rimworld-mw2): plays RimWorld's effects with MW2's own, as `frame::RimFx` lists
++/// them: the first of each list of names the game has; once, or kept going (started again
++/// should it end) until no longer listed.
++fn present_rim_fx(
++    rim: Option<ResMut<frame::RimFx>>,
++    catalog: Option<Res<PreparedFxCatalog>>,
++    mut elem_infos: ResMut<PreparedFxElemInfos>,
++    mut host: ResMut<HostFxSystem>,
++    fx_world: FxSceneAccess,
++    mut playing: Local<RimFxPlaying>,
++) {
++    let Some(mut rim) = rim else {
++        return;
++    };
++    let Some(catalog) = catalog else {
++        rim.once.clear();
++        return;
++    };
++    if rim.once.is_empty() && rim.held.is_empty() && playing.held.is_empty() {
++        return;
++    }
++    elem_infos.0.sync(&catalog.0);
++    let view = fx_world.view();
++    let scene = view.as_ref().map(|scene| scene as &dyn FxScene);
++    let RimFxPlaying { held, chosen } = &mut *playing;
++    let mut pick = |names: &'static [&'static str]| -> Option<&'static str> {
++        *chosen.entry(names.as_ptr() as usize).or_insert_with(|| {
++            let found = names.iter().copied().find(|name| catalog.0.map_fx_name(name).resolve(&catalog.0).is_some());
++            match found {
++                Some(name) => println!("[rimworld] effect: {name}"),
++                None => println!("[rimworld] no MW2 effect of {names:?}"),
++            }
++            found
++        })
++    };
++    for shot in std::mem::take(&mut rim.once) {
++        let Some(name) = pick(shot.names) else { continue };
++        play_named_oriented_in_world(
++            &mut host.0,
++            &catalog.0,
++            &elem_infos.0,
++            catalog.0.map_fx_name(name),
++            shot.origin,
++            axis_from_hit_normal(shot.forward),
++            scene,
++        );
++    }
++    let now = host.0.msec_now;
++    held.retain(|key, (handle, name, origin, began)| {
++        let ours = host.0.slot_for_handle(*handle).filter(|slot| slot.def_name == *name && slot.msec_begin == *began);
++        let looping = ours.is_some_and(|slot| slot.status & fx_iw4::FX_STATUS_HAS_PENDING_LOOP_ELEMS != 0);
++        let wanted = rim.held.get(key).is_some_and(|shot| shot.origin == *origin && shot.names.contains(name));
++        let keep = ours.is_some() && wanted && (looping || now.wrapping_sub(*began) < RIM_FX_AGAIN_MS);
++        if !keep && ours.is_some() {
++            host.0.stop_owned(*handle);
++        }
++        keep
++    });
++    for (key, shot) in &rim.held {
++        if held.contains_key(key) {
++            continue;
++        }
++        let Some(name) = pick(shot.names) else { continue };
++        let Some(handle) = spawn_named_oriented_in_world(
++            &mut host.0,
++            &catalog.0,
++            &elem_infos.0,
++            catalog.0.map_fx_name(name),
++            shot.origin,
++            axis_from_hit_normal(shot.forward),
++            now,
++            scene,
++        )
++        .and_then(PlayResult::handle) else {
++            continue;
++        };
++        let began = host.0.slot_for_handle(handle).map_or(now, |slot| slot.msec_begin);
++        held.insert(*key, (handle, name, shot.origin, began));
++    }
++}
++
+ #[derive(Default)]
+ struct TrackerLight {
+     owner: Option<(
+diff --git a/crates/rimworld_bridge/src/lib.rs b/crates/rimworld_bridge/src/lib.rs
+index 534c21a..d2813c2 100644
+--- a/crates/rimworld_bridge/src/lib.rs
++++ b/crates/rimworld_bridge/src/lib.rs
+@@ -16,7 +16,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
+ 
+ use bevy::prelude::*;
+ use rwmw2_protocol::{DEFAULT_ADDR, Message, PROTOCOL_VERSION, Side};
+-pub use rwmw2_protocol::{BuildingState, Carried, DoorState, GunTiming, PlantKindArt, ItemState, LookState, LootItem, LootKind, LootSource, Message as BridgeMessage, PawnState, PlantState, ShotResult, Stance, WearState, roof, terrain};
++pub use rwmw2_protocol::{BuildingState, Carried, DoorState, FireState, GasPatch, GunTiming, PlantKindArt, ItemState, LookState, LootItem, LootKind, LootSource, Message as BridgeMessage, PawnState, PlantState, ShotResult, GAS_PATCH, Stance, WearState, roof, terrain};
+ 
+ pub struct RimworldBridgePlugin;
+ 
+@@ -133,6 +133,10 @@ pub struct RimworldLink {
+     pub glow_revision: u64,
+     /// What it costs a pawn to walk into each cell, from the latest `costs` (M17).
+     pub costs: Option<Arc<Costs>>,
++    /// Every fire on the map in view, and the gas hanging over it, from the latest `fires`
++    /// and `gas` (M20).
++    pub fires: Option<Arc<Vec<FireState>>>,
++    pub gas: Option<Arc<Vec<GasPatch>>>,
+ }
+ 
+ /// MW2's own window (a Windows handle), once the engine has found it: its `hello` tells
+@@ -342,6 +346,12 @@ pub struct Shell {
+     pub to: [f32; 3],
+     pub seconds: f32,
+     pub arc: bool,
++    /// M20: RimWorld's picture of it and its size in cells, how high it is lobbed in cells,
++    /// and how long it lies where it landed before going off, in seconds.
++    pub tex: Option<i32>,
++    pub size: Option<f32>,
++    pub lob: Option<f32>,
++    pub fuse: Option<f32>,
+ }
+ 
+ /// An explosion: its middle (`x`, `z` north, in cells), radius in cells, and RimWorld's
+@@ -536,11 +546,23 @@ fn drain_inbox(inbox: Res<RimworldInbox>, mut link: ResMut<RimworldLink>) {
+                 link.terrain = Some(Arc::new(Terrain { size, cells: cells.into_bytes() }));
+                 link.terrain_revision += 1;
+             }
+-            BridgeEvent::Received(Message::Shell { weapon, from, to, seconds, arc, .. }) => {
++            BridgeEvent::Received(Message::Shell { weapon, from, to, seconds, arc, tex, size, lob, fuse, .. }) => {
+                 if link.shells.len() < MAX_SHOTS {
+-                    link.shells.push(Shell { weapon, from, to, seconds, arc });
++                    link.shells.push(Shell { weapon, from, to, seconds, arc, tex, size, lob, fuse });
+                 }
+             }
++            BridgeEvent::Received(Message::Fires { fires }) => {
++                if link.fires.is_none() && !fires.is_empty() {
++                    report(&format!("fires: {}", fires.len()));
++                }
++                link.fires = Some(Arc::new(fires));
++            }
++            BridgeEvent::Received(Message::Gas { gas }) => {
++                if link.gas.is_none() && !gas.is_empty() {
++                    report(&format!("gas: {} patches", gas.len()));
++                }
++                link.gas = Some(Arc::new(gas));
++            }
+             BridgeEvent::Received(Message::Explosion { x, z, radius, damage }) => {
+                 if link.explosions.len() < MAX_SHOTS {
+                     link.explosions.push(Explosion { x, z, radius, damage });
+diff --git a/crates/rimworld_world/src/lib.rs b/crates/rimworld_world/src/lib.rs
+index 382b95b..f36f986 100644
+--- a/crates/rimworld_world/src/lib.rs
++++ b/crates/rimworld_world/src/lib.rs
+@@ -281,7 +281,7 @@ pub struct RimworldWorldPlugin;
+ 
+ impl Plugin for RimworldWorldPlugin {
+     fn build(&self, app: &mut App) {
+-        app.init_resource::<FlatFloor>().init_resource::<frame::RimLootUi>().init_resource::<frame::RimHold>().add_systems(
++        app.init_resource::<FlatFloor>().init_resource::<frame::RimLootUi>().init_resource::<frame::RimHold>().init_resource::<frame::RimFx>().add_systems(
+             Update,
+             (
+                 update
+@@ -299,6 +299,8 @@ impl Plugin for RimworldWorldPlugin {
+                 rimview::one_window.after(update).in_set(frame::ClientSet::Present),
+                 use_key.after(update).in_set(frame::ClientSet::Present),
+                 hold_and_menu.after(update).in_set(frame::ClientSet::Present),
++                present_effects.after(update).in_set(frame::ClientSet::Present),
++                throw_key.after(update).in_set(frame::ClientSet::Present),
+                 skip_class_select.in_set(frame::ClientSet::Present),
+                 spectate_camera
+                     .after(update)
+@@ -332,6 +334,62 @@ fn use_key(
+     }
+ }
+ 
++/// M20: fire or G while the played colonist holds grenades (RimWorld says how far they are
++/// thrown): RimWorld throws one where the player aims on the ground, no further than it can
++/// be thrown and no sooner than RimWorld would throw the next.
++#[allow(clippy::too_many_arguments)]
++fn throw_key(
++    time: Res<Time>,
++    floor: Res<FlatFloor>,
++    link: Option<Res<RimworldLink>>,
++    keys: Option<Res<ButtonInput<KeyCode>>>,
++    mouse: Option<Res<ButtonInput<MouseButton>>>,
++    (hud_input, loot, hold): (Option<Res<frame::HudInputView>>, Res<frame::RimLootUi>, Res<frame::RimHold>),
++    (presented, local): (Res<net::PresentedSnapshot>, Res<net::LocalPresentClient>),
++    outbox: Option<Res<RimworldOutbox>>,
++    mut wait: Local<f32>,
++) {
++    let link = link.as_deref();
++    let rate = link.and_then(|link| link.rate).unwrap_or(1.0).max(0.1);
++    *wait = (*wait - time.delta_secs()).max(0.0);
++    let Some((gun, range)) = link.and_then(|link| link.player_gun).and_then(|gun| Some((gun, gun.throw?))) else {
++        return;
++    };
++    let pressed = mouse.is_some_and(|mouse| mouse.just_pressed(MouseButton::Left)) || keys.is_some_and(|keys| keys.just_pressed(KeyCode::KeyG));
++    if !pressed || !floor.active || floor.spectating || hold.paused || loot.open {
++        return;
++    }
++    if hud_input.is_some_and(|input| input.console_open || input.script_menu_open) {
++        return;
++    }
++    let (Some(pawn), Some(outbox), Some(ps)) = (floor.playing.clone(), outbox, presented.player(local.0)) else {
++        return;
++    };
++    if *wait > 0.0 {
++        println!("[rimworld] not ready to throw again for {:.1}s", *wait);
++        return;
++    }
++    let eye = [ps.origin[0], ps.origin[1], ps.origin[2] + ps.view_height_current];
++    let reach = range.max(1.0) * CELL as f32 * BLOCK;
++    let to = floor.map_to_rimworld(aim_on_ground(eye, ps.viewangles, ps.origin[2], reach));
++    if outbox.send(&BridgeMessage::PlayerThrow { pawn, to }) {
++        println!("[rimworld] threw at ({:.1}, {:.1})", to[0], to[1]);
++        *wait = (gun.warmup + gun.cooldown) / rate;
++    }
++}
++
++/// Where a player whose eye is at map point `eye`, looking along `angles` (pitch, yaw in
++/// degrees, MW2's), aims on the ground at height `ground`: no further across than `reach`,
++/// and that far when they look level or up.
++fn aim_on_ground(eye: [f32; 3], angles: [f32; 3], ground: f32, reach: f32) -> [f32; 3] {
++    let (pitch, yaw) = (angles[0].to_radians(), angles[1].to_radians());
++    let across = Vec2::new(yaw.cos(), yaw.sin());
++    let down = pitch.sin();
++    let far = if down > 0.01 { (eye[2] - ground).max(0.0) / down * pitch.cos() } else { reach };
++    let d = far.min(reach);
++    [eye[0] + across.x * d, eye[1] + across.y * d, ground]
++}
++
+ /// M18: while RimWorld is paused the MW2 player is held still (the input obeys
+ /// `frame::RimHold`), and RimWorld hears when MW2's Escape menu opens and closes, so its
+ /// minimap window hides from in front of the menu.
+@@ -476,6 +534,8 @@ pub struct FlatFloor {
+     shells: Vec<ShellFlight>,
+     /// Explosions and incoming whistles for MW2 to show and sound this frame.
+     booms: Vec<Boom>,
++    /// MW2 effects for RimWorld's this frame (M20): bullets striking, muzzle flashes, blasts.
++    effects: Vec<frame::RimFxShot>,
+     /// Seconds since the player was last handed their colonist's gun, and the RimWorld gun
+     /// last reported.
+     since_arm: f32,
+@@ -539,6 +599,8 @@ struct Tracer {
+     /// Who fired it, and RimWorld's id for it while it may still strike the player.
+     shooter: String,
+     id: Option<String>,
++    /// RimWorld says it hits someone (M20: blood where it lands, not dirt).
++    hit: bool,
+ }
+ 
+ impl Tracer {
+@@ -559,7 +621,7 @@ impl Tracer {
+             to = first_wall(lay, from, to).unwrap_or(to);
+         }
+         let speed = shot.speed.unwrap_or(TRACER_SPEED).clamp(10.0, 500.0) * CELL as f32;
+-        Self { from, to, speed, flown: 0.0, shooter: shot.shooter.clone(), id: shot.id.clone() }
++        Self { from, to, speed, flown: 0.0, shooter: shot.shooter.clone(), id: shot.id.clone(), hit: shot.hit }
+     }
+ 
+     /// The point `d` blocks along its path, or its end.
+@@ -632,6 +694,8 @@ impl Body {
+ 
+ /// A mortar shell, grenade or rocket RimWorld fired, in flight across the floor, in block
+ /// space: from where to where, how long it takes, how high it goes, and how long it has flown.
++/// M20: drawn as RimWorld's own picture of it when it has one (`tex`, `size` blocks across),
++/// and a grenade lies where it landed for its `fuse` before it goes off.
+ #[derive(Clone, Debug, PartialEq)]
+ struct ShellFlight {
+     from: Vec3,
+@@ -642,6 +706,9 @@ struct ShellFlight {
+     arc: bool,
+     /// Its incoming whistle has started.
+     whistled: bool,
++    tex: Option<u16>,
++    size: f32,
++    fuse: f32,
+ }
+ 
+ impl ShellFlight {
+@@ -649,9 +716,26 @@ impl ShellFlight {
+         let block = |[x, y, z]: [f32; 3]| rimworld_block(size, x, y, z);
+         let (from, to) = (block(shell.from), block(shell.to));
+         let reach = from.distance(to);
+-        // A mortar climbs high and drops; a thrown grenade or a rocket keeps low.
+-        let apex = if shell.arc { (reach * 0.4).clamp(8.0, 60.0) } else { (reach * 0.12).clamp(0.3, 4.0) };
+-        Self { from, to, seconds: shell.seconds.clamp(0.1, 30.0), apex, flown: 0.0, arc: shell.arc, whistled: false }
++        // A mortar climbs high and drops; a rocket keeps low; a thrown grenade is lobbed as
++        // high as RimWorld lobs it, which looks right only a little higher (M20: it skimmed
++        // the ground as a dark streak).
++        let apex = match (shell.arc, shell.lob) {
++            (true, _) => (reach * 0.4).clamp(8.0, 60.0),
++            (false, Some(lob)) => (lob * CELL as f32 * LOB_SCALE).clamp(0.5, 12.0),
++            (false, None) => (reach * 0.12).clamp(0.3, 4.0),
++        };
++        Self {
++            from,
++            to,
++            seconds: shell.seconds.clamp(0.1, 30.0),
++            apex,
++            flown: 0.0,
++            arc: shell.arc,
++            whistled: false,
++            tex: shell.tex.and_then(|tex| u16::try_from(tex).ok()),
++            size: shell.size.unwrap_or(1.0).clamp(0.2, 4.0) * CELL as f32,
++            fuse: shell.fuse.unwrap_or(0.0).clamp(0.0, MAX_FUSE),
++        }
+     }
+ 
+     /// Where it is `t` seconds after leaving.
+@@ -660,12 +744,33 @@ impl ShellFlight {
+         self.from.lerp(self.to, f) + Vec3::Y * self.apex * 4.0 * f * (1.0 - f)
+     }
+ 
++    /// It has landed, and lies there until it goes off.
++    fn landed(&self) -> bool {
++        self.flown >= self.seconds
++    }
++
+     /// The streak it draws now, tail then head; `None` once it has landed.
+     fn streak(&self) -> Option<(Vec3, Vec3)> {
+         (self.flown < self.seconds).then(|| (self.at(self.flown - SHELL_STREAK_SECONDS), self.at(self.flown)))
+     }
++
++    /// Degrees clockwise from north it flies, for lying along the way it came.
++    fn heading(&self) -> f32 {
++        let way = self.to - self.from;
++        way.x.atan2(-way.z).to_degrees()
++    }
+ }
+ 
++/// How much higher than RimWorld a thrown grenade is lobbed (RimWorld's arc is seen from
++/// above, so it looks flatter from beside).
++const LOB_SCALE: f32 = 1.5;
++/// Longest a grenade lies before going off, in seconds; the explosion usually ends it first.
++const MAX_FUSE: f32 = 10.0;
++/// Seconds a landed grenade may lie past its fuse, waiting for RimWorld's explosion.
++const FUSE_GRACE: f32 = 0.5;
++/// Blocks from a landed grenade within which an explosion is its own.
++const FUSE_BLAST_REACH: f32 = 2.0 * CELL as f32;
++
+ /// Something for MW2 to show or sound, at a map point.
+ #[derive(Clone, Debug, PartialEq)]
+ enum Boom {
+@@ -686,7 +791,7 @@ fn fly_shells(shells: &mut Vec<ShellFlight>, dt: f32) -> Vec<Vec3> {
+             whistles.push(shell.to);
+         }
+     }
+-    shells.retain(|shell| shell.flown < shell.seconds);
++    shells.retain(|shell| shell.flown < shell.seconds + shell.fuse + if shell.fuse > 0.0 { FUSE_GRACE } else { 0.0 });
+     whistles
+ }
+ 
+@@ -1087,6 +1192,9 @@ fn update(
+         body.as_ref().filter(|_| shot.hit && shot.target.is_some() && shot.target == playing)
+     };
+     let fired: Vec<Tracer> = shots.iter().take(room).map(|shot| Tracer::new(shot, floor.lay(), at_player(shot))).collect();
++    // M20: each RimWorld shot flashes at the muzzle, and kicks up dirt (or blood) where it lands.
++    let effects = shot_effects(&floor, &fired, time.delta_secs());
++    floor.effects.extend(effects);
+     floor.tracers.extend(fired);
+     let struck = fly_tracers(&mut floor.tracers, time.delta_secs(), body.as_ref(), playing.as_deref());
+     if let (Some(pawn), Some(outbox)) = (playing, outbox.as_deref()) {
+@@ -1104,8 +1212,15 @@ fn update(
+     floor.booms.extend(whistles.into_iter().map(|at| Boom::Whistle(to_map(at))));
+     // RimWorld's explosions, for MW2 to show and sound.
+     for blast in blasts.iter().take(MAX_TRACERS) {
+-        let at = to_map(rimworld_block(size, blast.x, 0.0, blast.z));
++        let middle = rimworld_block(size, blast.x, 0.0, blast.z);
++        let at = to_map(middle);
+         floor.booms.push(Boom::Explosion { at, radius: blast.radius * CELL as f32 * BLOCK, damage: blast.damage.clone() });
++        // M20: as RimWorld shows it: fire, foam, an EMP's crackle, a puff of smoke.
++        if let Some(names) = blast_effect(&blast.damage) {
++            floor.effects.push(frame::RimFxShot { names, origin: at, forward: [0.0, 0.0, 1.0] });
++        }
++        // A grenade lying there was the one going off.
++        floor.shells.retain(|shell| !(shell.fuse > 0.0 && shell.landed() && Vec2::new(shell.to.x - middle.x, shell.to.z - middle.z).length() <= FUSE_BLAST_REACH));
+     }
+     // Every figure but the player's own is a target.
+     floor.targets = targets(&floor.figures, floor.playing.as_deref(), &floor.cutouts);
+@@ -1326,6 +1441,9 @@ fn arm_player(floor: &mut FlatFloor, authority: &mut net::AuthorityWorld, local:
+         match (pawn.weapon.as_deref(), gun) {
+             (Some(rimworld), Some(name)) if want != 0 => println!("[rimworld] your gun: {name} (RimWorld {rimworld})"),
+             (Some(rimworld), Some(name)) => println!("[rimworld] no MW2 gun {name} for RimWorld {rimworld}: empty handed"),
++            (Some(rimworld), None) if rimworld.contains("Grenade") || rimworld.contains("Molotov") => {
++                println!("[rimworld] your colonist holds {rimworld}: click or G to throw one where you aim")
++            }
+             (Some(rimworld), None) => println!("[rimworld] RimWorld {rimworld} isn't a gun: empty handed"),
+             (None, _) => println!("[rimworld] your colonist has no gun: empty handed"),
+         }
+@@ -3606,8 +3724,16 @@ fn figure_mesh<'a>(figures: impl Iterator<Item = &'a Figure>, tracers: &[Tracer]
+     for (tail, head) in tracers.iter().filter_map(Tracer::streak) {
+         add_segment(&mut vertices, &mut indices, tail, head, TRACER_HALF_WIDTH, [1.0, 0.86, 0.45]);
+     }
+-    for (tail, head) in shells.iter().filter_map(ShellFlight::streak) {
+-        add_segment(&mut vertices, &mut indices, tail, head, SHELL_HALF_WIDTH, [0.22, 0.22, 0.2]);
++    for shell in shells {
++        // RimWorld's own picture of it (M20), flying and then lying where it landed.
++        if let Some((tex, bounds)) = shell.tex.and_then(|tex| Some((tex, *cards.cutouts.get(&tex)?))) {
++            let (w, h) = ((bounds[2] - bounds[0]) * shell.size, (bounds[3] - bounds[1]) * shell.size);
++            let at = shell.at(shell.flown);
++            let (lie, lift) = if shell.landed() { (Some(shell.heading()), 0.0) } else { (None, (at.y - h / 2.0).max(0.0)) };
++            add_card(&mut vertices, &mut indices, [at.x, at.z], cards.eye, tex, bounds, [w, h], false, lie, lift, WHITE);
++        } else if let Some((tail, head)) = shell.streak() {
++            add_segment(&mut vertices, &mut indices, tail, head, SHELL_HALF_WIDTH, [0.22, 0.22, 0.2]);
++        }
+     }
+     for figure in figures {
+         if let Some(card) = card(figure, cards.cutouts, cards.eye, cards.people) {
+@@ -4407,6 +4533,9 @@ fn blast_weapon(kit: &BoomKit, radius_cells: f32, damage: &str) -> Option<u32> {
+     match damage {
+         "Smoke" => kit.smoke,
+         "EMP" => kit.emp,
++        // M20: no bang for a firefoam popper's foam or a molotov's flames: their own effects
++        // show them (`blast_effect`).
++        "Extinguish" | "Flame" => return None,
+         _ if radius_cells >= BIG_BLAST_FROM => kit.big,
+         _ => kit.small,
+     }
+@@ -4481,6 +4610,161 @@ fn present_booms(
+     }
+ }
+ 
++/// M20: MW2's own effects for RimWorld's, each a list of names to try in turn (the game has
++/// the effects of every map loaded, so not all of them).
++mod fx_names {
++    pub const MUZZLE: &[&str] = &["muzzleflashes/ak47_flash_wv", "muzzleflashes/heavy_flash_wv_a", "muzzleflashes/beretta_flash_wv"];
++    pub const DIRT: &[&str] = &["impacts/large_dirt_1", "impacts/large_dirt", "impacts/default_hit"];
++    pub const WALL: &[&str] = &["impacts/large_concrete_1", "impacts/large_brick", "impacts/default_hit"];
++    pub const FLESH: &[&str] = &["impacts/flesh_hit_body_nonfatal", "impacts/flesh_hit", "impacts/flesh_hit_splat"];
++    pub const FIRE_SMALL: &[&str] = &["fire/firelp_small_pm", "fire/firelp_small_pm_a", "fire/fire_woodtrash_small1v2res"];
++    pub const FIRE_BIG: &[&str] = &["fire/fire_med_loop02_res", "fire/firelp_barrel_pm", "fire/fire_vehicle_small_loop1_res", "fire/firelp_small_pm"];
++    pub const FIRE_SMOKE: &[&str] = &["smoke/thin_black_smoke_m", "smoke/car_damage_blacksmoke", "smoke/thin_black_smoke_l"];
++    pub const SMOKE: &[&str] = &["smoke/battlefield_smokebank_s", "smoke/room_smoke_200", "smoke/hallway_smoke_light", "smoke/thin_light_smoke_l"];
++    pub const TOX: &[&str] = &["smoke/thin_light_smoke_l", "smoke/car_damage_whitesmoke", "smoke/battlefield_smokebank_s"];
++    pub const ROT: &[&str] = &["smoke/thin_light_smoke_m", "smoke/thin_light_smoke_l"];
++    pub const DUST: &[&str] = &["smoke/thin_black_smoke_l", "smoke/car_damage_blacksmoke", "smoke/battlefield_smokebank_s"];
++    pub const FLAME_BLAST: &[&str] = &["explosions/fire_vehicle_flame_up_medbig1", "props/barrelexp", "explosions/grenadeexp_default"];
++    pub const EMP_BLAST: &[&str] = &["explosions/emp_flash_mp", "explosions/electrical_transformer_sparks_a", "explosions/generator_sparks_a"];
++    pub const FOAM_BLAST: &[&str] = &["explosions/steam_pipe_burst1", "smoke/flashbang_smoke", "smoke/grenade_smoke"];
++    pub const SMOKE_BLAST: &[&str] = &["smoke/grenade_smoke", "smoke/flashbang_smoke"];
++    pub const STUN_BLAST: &[&str] = &["explosions/flashbang", "explosions/concussion_grenade"];
++}
++
++/// The effect a RimWorld blast of `damage` adds to MW2's explosion (M20), if any.
++fn blast_effect(damage: &str) -> Option<&'static [&'static str]> {
++    Some(match damage {
++        "Flame" | "Burn" | "Incineration" | "Napalm" => fx_names::FLAME_BLAST,
++        "EMP" | "ElectricalBurn" | "MechBandShockwave" => fx_names::EMP_BLAST,
++        "Extinguish" => fx_names::FOAM_BLAST,
++        "Smoke" | "ToxGas" | "Tox" | "DeadlifeDust" | "RotStink" => fx_names::SMOKE_BLAST,
++        "Stun" | "Flashbang" => fx_names::STUN_BLAST,
++        _ => return None,
++    })
++}
++
++/// Blocks from the eye within which bullets flash and strike (M20), and how many a frame.
++const SHOT_EFFECT_REACH: f32 = 60.0 * CELL as f32;
++const MAX_SHOT_EFFECTS: usize = 12;
++
++/// A direction in block space (x east, y up, z south) as one in MW2's map space.
++fn map_direction(way: Vec3) -> [f32; 3] {
++    let way = way.normalize_or(Vec3::Y);
++    [way.x, -way.z, way.y]
++}
++
++/// M20: a muzzle flash for each of RimWorld's shots just `fired`, and a strike where each
++/// tracer in flight lands within the next `dt` seconds: blood on someone hit, dust off a
++/// wall, dirt on the ground. Only near the eye, and only so many a frame.
++fn shot_effects(floor: &FlatFloor, fired: &[Tracer], dt: f32) -> Vec<frame::RimFxShot> {
++    let eye = floor.eye.map(|eye| Vec3::new(eye[0] as f32, eye[1] as f32, eye[2] as f32));
++    let near = |p: Vec3| eye.is_none_or(|eye| eye.distance(p) <= SHOT_EFFECT_REACH);
++    let to_map = |b: Vec3| sim::voxel::to_map(floor.origin, [f64::from(b.x), f64::from(b.y), f64::from(b.z)]);
++    let playing = floor.playing.as_deref();
++    let flashes = fired
++        .iter()
++        .filter(|tracer| near(tracer.from) && Some(tracer.shooter.as_str()) != playing)
++        .map(|tracer| frame::RimFxShot { names: fx_names::MUZZLE, origin: to_map(tracer.from), forward: map_direction(tracer.to - tracer.from) });
++    let strikes = floor
++        .tracers
++        .iter()
++        .filter(|tracer| {
++            let length = tracer.from.distance(tracer.to);
++            tracer.flown < length && tracer.flown + tracer.speed * dt >= length && near(tracer.to)
++        })
++        .map(|tracer| {
++            let names = if tracer.hit {
++                fx_names::FLESH
++            } else if tracer.to.y > 0.3 {
++                fx_names::WALL
++            } else {
++                fx_names::DIRT
++            };
++            frame::RimFxShot { names, origin: to_map(tracer.to), forward: map_direction(tracer.from - tracer.to) }
++        });
++    flashes.chain(strikes).take(MAX_SHOT_EFFECTS).collect()
++}
++
++/// Fires and gas patches shown at most, the nearest the eye first, and how far away (M20).
++const MAX_FIRE_EFFECTS: usize = 32;
++const MAX_GAS_EFFECTS: usize = 32;
++const EFFECT_REACH: f32 = 80.0 * CELL as f32;
++/// A fire this big (RimWorld's `fireSize`) burns as a big one, with smoke above it.
++const BIG_FIRE: f32 = 0.9;
++/// Gas this thick (of 255) shows; rot stink only when this thick.
++const THIN_GAS: u8 = 30;
++const THICK_ROT: u8 = 140;
++
++/// The effects kept going for RimWorld's fires and gas (M20), by a key steady from frame to
++/// frame: the nearest the eye, as many as MW2 can carry.
++fn lasting_effects(floor: &FlatFloor, fires: &[rimworld_bridge::FireState], gas: &[rimworld_bridge::GasPatch]) -> HashMap<u64, frame::RimFxShot> {
++    let size = floor.size;
++    let eye = floor.eye.map(|eye| Vec2::new(eye[0] as f32, eye[2] as f32));
++    let away = |p: Vec3| eye.map_or(0.0, |eye| eye.distance(Vec2::new(p.x, p.z)));
++    let to_map = |b: Vec3| sim::voxel::to_map(floor.origin, [f64::from(b.x), f64::from(b.y), f64::from(b.z)]);
++    let key = |kind: u64, x: f32, z: f32| (kind << 56) | ((((x * 4.0) as i64 as u64) & 0x0fff_ffff) << 28) | (((z * 4.0) as i64 as u64) & 0x0fff_ffff);
++    let up = [0.0, 0.0, 1.0];
++    let mut held = HashMap::new();
++    let mut burning: Vec<(f32, &rimworld_bridge::FireState, Vec3)> = fires
++        .iter()
++        .map(|fire| {
++            let at = rimworld_block(size, fire.x, 0.0, fire.z);
++            (away(at), fire, at)
++        })
++        .filter(|(distance, ..)| *distance <= EFFECT_REACH)
++        .collect();
++    burning.sort_by(|a, b| a.0.total_cmp(&b.0));
++    for (_, fire, at) in burning.into_iter().take(MAX_FIRE_EFFECTS) {
++        let big = fire.size >= BIG_FIRE;
++        let names = if big { fx_names::FIRE_BIG } else { fx_names::FIRE_SMALL };
++        held.insert(key(1, fire.x, fire.z), frame::RimFxShot { names, origin: to_map(at), forward: up });
++        if big {
++            held.insert(key(2, fire.x, fire.z), frame::RimFxShot { names: fx_names::FIRE_SMOKE, origin: to_map(at + Vec3::Y), forward: up });
++        }
++    }
++    let half = rimworld_bridge::GAS_PATCH as f32 / 2.0;
++    let mut hanging: Vec<(f32, &'static [&'static str], [f32; 2], Vec3)> = gas
++        .iter()
++        .filter_map(|patch| {
++            let names = match patch.kind.as_str() {
++                "smoke" if patch.density >= THIN_GAS => fx_names::SMOKE,
++                "tox" if patch.density >= THIN_GAS => fx_names::TOX,
++                "dust" if patch.density >= THIN_GAS => fx_names::DUST,
++                "rot" if patch.density >= THICK_ROT => fx_names::ROT,
++                _ => return None,
++            };
++            let (x, z) = (patch.at[0] as f32 + half, patch.at[1] as f32 + half);
++            let at = rimworld_block(size, x, 0.0, z);
++            Some((away(at), names, [x, z], at))
++        })
++        .filter(|(distance, ..)| *distance <= EFFECT_REACH)
++        .collect();
++    hanging.sort_by(|a, b| a.0.total_cmp(&b.0));
++    for (_, names, [x, z], at) in hanging.into_iter().take(MAX_GAS_EFFECTS) {
++        held.insert(key(3, x, z), frame::RimFxShot { names, origin: to_map(at), forward: up });
++    }
++    held
++}
++
++/// Hands MW2's effects system what RimWorld shows this frame (M20): the blasts and bullet
++/// strikes `update` found, and its fires and gas, kept going while they last.
++fn present_effects(mut floor: ResMut<FlatFloor>, link: Option<Res<RimworldLink>>, mut fx: ResMut<frame::RimFx>) {
++    let once = std::mem::take(&mut floor.effects);
++    let connected = floor.active && link.as_deref().is_some_and(|link| link.connected);
++    if !connected {
++        fx.held.clear();
++        return;
++    }
++    fx.once.extend(once);
++    let link = link.as_deref();
++    let fires = link.and_then(|link| link.fires.as_deref()).map_or(&[][..], Vec::as_slice);
++    let gas = link.and_then(|link| link.gas.as_deref()).map_or(&[][..], Vec::as_slice);
++    let held = lasting_effects(&floor, fires, gas);
++    if fx.held != held {
++        fx.held = held;
++    }
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+@@ -5460,9 +5744,62 @@ mod tests {
+         assert_eq!(pick_whistle(&["weap_ak47"]), None);
+     }
+ 
++    #[test]
++    fn a_grenade_is_thrown_where_the_player_aims_no_further_than_it_can_go() {
++        // Looking 45 degrees down from 60 up: 60 across, east (yaw 0).
++        let at = aim_on_ground([0.0, 0.0, 60.0], [45.0, 0.0, 0.0], 0.0, 500.0);
++        assert!((at[0] - 60.0).abs() < 0.01 && at[1].abs() < 0.01 && at[2] == 0.0, "{at:?}");
++        // Looking level, or too far: as far as it goes, north (yaw 90).
++        let at = aim_on_ground([0.0, 0.0, 60.0], [0.0, 90.0, 0.0], 0.0, 300.0);
++        assert!(at[0].abs() < 0.01 && (at[1] - 300.0).abs() < 0.01, "{at:?}");
++        let at = aim_on_ground([0.0, 0.0, 60.0], [5.0, 0.0, 0.0], 0.0, 300.0);
++        assert!((at[0] - 300.0).abs() < 0.01);
++    }
++
++    #[test]
++    fn a_grenade_flies_as_its_picture_and_lies_until_it_goes_off() {
++        let shell = rimworld_bridge::Shell {
++            weapon: "Proj_GrenadeFrag".into(),
++            from: [10.0, 1.3, 10.0],
++            to: [18.0, 0.0, 10.0],
++            seconds: 1.0,
++            arc: false,
++            tex: Some(7),
++            size: Some(1.0),
++            lob: Some(1.6),
++            fuse: Some(1.5),
++        };
++        let mut shells = vec![ShellFlight::new(&shell, 250)];
++        assert!(shells[0].at(0.5).y > 4.0, "lobbed above a soldier's head: {:?}", shells[0].at(0.5));
++        fly_shells(&mut shells, 1.2);
++        assert!(shells[0].landed(), "landed");
++        fly_shells(&mut shells, 1.0);
++        assert_eq!(shells.len(), 1, "still lying there, fuse burning");
++        fly_shells(&mut shells, 1.0);
++        assert!(shells.is_empty(), "gone off");
++    }
++
++    #[test]
++    fn rimworld_effects_have_mw2_effects() {
++        assert_eq!(blast_effect("Extinguish"), Some(fx_names::FOAM_BLAST));
++        assert_eq!(blast_effect("Flame"), Some(fx_names::FLAME_BLAST));
++        assert_eq!(blast_effect("Bomb"), None, "a bang is MW2's own explosion");
++        let floor = FlatFloor { size: 100, ..Default::default() };
++        let fires = [rimworld_bridge::FireState { x: 10.5, z: 10.5, size: 0.3 }, rimworld_bridge::FireState { x: 12.5, z: 10.5, size: 1.5 }];
++        let gas = [
++            rimworld_bridge::GasPatch { at: [20, 20], kind: "smoke".into(), density: 200 },
++            rimworld_bridge::GasPatch { at: [22, 20], kind: "rot".into(), density: 40 },
++        ];
++        let held = lasting_effects(&floor, &fires, &gas);
++        // A small fire, a big fire and its smoke, and the smoke; rot stink this thin shows nothing.
++        assert_eq!(held.len(), 4);
++        assert_eq!(held.values().filter(|shot| shot.names == fx_names::FIRE_BIG).count(), 1);
++        assert_eq!(lasting_effects(&floor, &fires, &gas), held, "the same keys from frame to frame");
++    }
++
+     #[test]
+     fn a_mortar_shell_climbs_drops_and_whistles_before_landing() {
+-        let shell = rimworld_bridge::Shell { weapon: "Bullet_Shell_HighExplosive".into(), from: [10.0, 1.0, 10.0], to: [50.0, 0.0, 10.0], seconds: 4.0, arc: true };
++        let shell = rimworld_bridge::Shell { weapon: "Bullet_Shell_HighExplosive".into(), from: [10.0, 1.0, 10.0], to: [50.0, 0.0, 10.0], seconds: 4.0, arc: true, tex: None, size: None, lob: None, fuse: None };
+         let mut shells = vec![ShellFlight::new(&shell, 250)];
+         let top = shells[0].at(2.0);
+         assert!(top.y > 15.0 && (top.x - 30.0 * C).abs() < 0.01, "{top}");

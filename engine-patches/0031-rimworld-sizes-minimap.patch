@@ -1,0 +1,339 @@
+diff --git a/crates/hud/src/compass.rs b/crates/hud/src/compass.rs
+index 7c5da63..6ecf418 100644
+--- a/crates/hud/src/compass.rs
++++ b/crates/hud/src/compass.rs
+@@ -65,6 +65,9 @@ pub(crate) fn spawn_compass(root: &mut ChildSpawnerCommands) {
+ const MINECRAFT_MINIMAP: &str = "mc_minimap";
+ /// The yaw of north on a Minecraft map: map +Y.
+ const MINECRAFT_NORTH_YAW: f32 = 90.0;
++/// How many times the usual minimap's size RimWorld's map is drawn, showing as many times
++/// more of the map (RimWorld's picture is that much wider).
++const RIMWORLD_MINIMAP_GROW: f32 = 3.0;
+ 
+ fn hide(pass: &mut HudTessPass) {
+     pass.compass = TessJob::Hide;
+@@ -178,7 +181,10 @@ pub(crate) fn update_compass(
+         hide(&mut pass);
+         return;
+     }
+-    let map_rotation = -(ps.viewangles[1] - drawable.north_yaw);
++    // RimWorld's map (M14): north up as in RimWorld, three times the size, no arrow (the
++    // played colonist shows on it), in RimWorld's own colours.
++    let rimworld = minecraft.as_ref().is_some_and(|ui| ui.floor_minimap && !ui.active);
++    let map_rotation = if rimworld { 0.0 } else { -(ps.viewangles[1] - drawable.north_yaw) };
+ 
+     let [player_w, player_h] = compass_player_size(
+         COMPASS_PLAYER_WIDTH_DEFAULT,
+@@ -192,7 +198,7 @@ pub(crate) fn update_compass(
+     );
+ 
+     let player_stem = items.player.and_then(|(_, item)| {
+-        if item.background.is_empty() {
++        if rimworld || item.background.is_empty() {
+             None
+         } else {
+             Some(item.background.as_str())
+@@ -280,6 +286,7 @@ pub(crate) fn update_compass(
+         [player_w, player_h],
+         radar,
+         jam_fade,
++        if rimworld { RIMWORLD_MINIMAP_GROW } else { 1.0 },
+     );
+ 
+     let map_ns = hud_images.map_namespace();
+@@ -446,12 +453,15 @@ fn build_compass_list(
+     player_size: [f32; 2],
+     radar_center_s: Option<f32>,
+     jam_fade: f32,
++    grow: f32,
+ ) -> Draw2dList {
+     let (map_index, map_item) = map;
+     let horz = map_item.rect.horz_align as i32;
+     let vert = map_item.rect.vert_align as i32;
+-    let vw = map_item.rect.w * COMPASS_SIZE_DEFAULT;
+-    let vh = map_item.rect.h * COMPASS_SIZE_DEFAULT;
++    let vw = map_item.rect.w * COMPASS_SIZE_DEFAULT * grow;
++    let vh = map_item.rect.h * COMPASS_SIZE_DEFAULT * grow;
++    // RimWorld's map is drawn as it is, not in the minimap's tint (M14: it came out dark).
++    let map_color = if grow > 1.0 { [1.0; 4] } else { map_item.fore_color };
+     let applied = surface.apply_rect(map_item.rect.x, map_item.rect.y, vw, vh, horz, vert);
+     let provenance_map = Draw2dProvenance::MenuItem {
+         menu: MINIMAP_MENU.into(),
+@@ -468,7 +478,7 @@ fn build_compass_list(
+         t0: 0.0,
+         s1: 1.0,
+         t1: 1.0,
+-        color: map_item.fore_color,
++        color: map_color,
+         material: map_image.into(),
+         op: Draw2dOp::RotateSt {
+             center_s: uv.center[0],
+diff --git a/crates/rimworld_world/src/lib.rs b/crates/rimworld_world/src/lib.rs
+index 5c9a65b..7ee4348 100644
+--- a/crates/rimworld_world/src/lib.rs
++++ b/crates/rimworld_world/src/lib.rs
+@@ -212,8 +212,10 @@ const TURN_RATE: f32 = 9.0;
+ const FACE_WALK_FROM: f32 = 0.5;
+ /// Seconds between `player_move` messages, as RimWorld's snapshots.
+ const MOVE_SECONDS: f32 = 0.1;
+-/// Cells between the player and their colonist before the player is put back on it.
++/// Cells between the player and their colonist before the player is put back on it, and the
++/// seconds of the player's own trail the colonist may be anywhere along.
+ const PLAYER_SNAP: f32 = 3.0;
++const SENT_MEMORY: f32 = 1.5;
+ /// A tracer's length and half thickness, in blocks, and its speed when RimWorld gives none.
+ const TRACER_LENGTH: f32 = 2.5;
+ const TRACER_HALF_WIDTH: f32 = 0.035;
+@@ -405,6 +407,9 @@ pub struct FlatFloor {
+     /// The colonist the local player plays as, and seconds since its last move was sent.
+     playing: Option<String>,
+     since_move: f32,
++    /// Where the player was told RimWorld lately, oldest first, with seconds since each: the
++    /// colonist RimWorld snapshots trails behind them, the further the faster they run.
++    sent: std::collections::VecDeque<(f32, [f32; 2])>,
+     /// Bullets in flight, drawn as tracers.
+     tracers: Vec<Tracer>,
+     /// Mortar shells, grenades and rockets in flight.
+@@ -1019,6 +1024,7 @@ fn update(
+         &Cards {
+             eye: floor.eye,
+             cutouts: &floor.cutouts,
++            people: people_scale(floor.figures.values(), &floor.cutouts),
+             items: link.as_deref().and_then(|link| link.items.as_deref()).map_or(&[][..], Vec::as_slice),
+             plants: plant_pictures.then(|| link.as_deref().and_then(|link| link.plants.as_deref())).flatten().map_or(&[][..], Vec::as_slice),
+             plant_art: plant_pictures.then(|| link.as_deref().and_then(|link| link.plant_art.as_deref())).flatten(),
+@@ -1071,6 +1077,15 @@ fn place_players(floor: &mut FlatFloor, authority: &mut net::AuthorityWorld, ski
+     }
+ }
+ 
++/// Whether RimWorld has held the colonist back from where the player went: the colonist is
++/// far from the player and from everywhere the player was lately. RimWorld's snapshots trail
++/// the player (more so at 3x speed and up), so the colonist being behind them is no reason
++/// to put them back (M14: at speed they were put back over and over and could not move).
++fn held_back(pawn: &PawnState, at: [f32; 2], sent: &std::collections::VecDeque<(f32, [f32; 2])>) -> bool {
++    let far = |[x, z]: [f32; 2]| (x - pawn.x).hypot(z - pawn.z) > PLAYER_SNAP;
++    far(at) && sent.iter().all(|(_, was)| far(*was))
++}
++
+ /// The local player plays `pawn`, a drafted colonist: put on it when they start
+ /// or drift too far from it, and their moves sent to RimWorld.
+ fn play_colonist(
+@@ -1088,7 +1103,14 @@ fn play_colonist(
+     let [x, z] = floor.map_to_rimworld(ps.origin);
+     let yaw = (90.0 - ps.viewangles[1]).rem_euclid(360.0);
+     let starting = floor.playing.as_deref() != Some(pawn.id.as_str());
+-    if starting || (x - pawn.x).hypot(z - pawn.z) > PLAYER_SNAP {
++    for (age, _) in &mut floor.sent {
++        *age += dt;
++    }
++    while floor.sent.front().is_some_and(|(age, _)| *age > SENT_MEMORY) {
++        floor.sent.pop_front();
++    }
++    if starting || held_back(pawn, [x, z], &floor.sent) {
++        floor.sent.clear();
+         let mut at = floor.rimworld_to_map(pawn.x, pawn.z);
+         at[2] = 1.0;
+         if !authority.0.teleport(local, at) {
+@@ -1105,6 +1127,7 @@ fn play_colonist(
+         return;
+     }
+     floor.since_move = 0.0;
++    floor.sent.push_back((0.0, [x, z]));
+     if let Some(outbox) = outbox {
+         outbox.send(&BridgeMessage::PlayerMove { pawn: pawn.id.clone(), x, z, yaw });
+     }
+@@ -1202,12 +1225,13 @@ fn arm_player(floor: &mut FlatFloor, authority: &mut net::AuthorityWorld, local:
+ /// Each figure as bullets see it: pawn id, whether it is a standing person
+ /// (with a head to hit), and a block-space box around it.
+ fn targets(figures: &HashMap<String, Figure>, playing: Option<&str>, cutouts: &HashMap<u16, [f32; 4]>) -> Vec<(String, bool, [f64; 6])> {
++    let people = people_scale(figures.values(), cutouts);
+     let mut targets: Vec<_> = figures
+         .iter()
+         .filter(|(id, _)| Some(id.as_str()) != playing)
+         .map(|(id, figure)| {
+             // Drawn as its RimWorld picture: as big as that.
+-            let drawn = card(figure, cutouts, None).map(|card| {
++            let drawn = card(figure, cutouts, None, people).map(|card| {
+                 let (w, h) = if figure.downed { (card.height, card.width) } else { (card.width, card.height) };
+                 (f64::from(w) * 0.35, f64::from(h))
+             });
+@@ -2594,6 +2618,8 @@ fn first_block(lay: Lay<'_>, from: Vec3, to: Vec3) -> Option<Vec3> {
+ struct Cards<'a> {
+     eye: Option<[f64; 3]>,
+     cutouts: &'a HashMap<u16, [f32; 4]>,
++    /// How much people grew to stand as tall as the player: animals and mechs grow as much.
++    people: f32,
+     items: &'a [rimworld_bridge::ItemState],
+     /// Every tree and bush RimWorld sent, and what each kind looks like in RimWorld.
+     plants: &'a [rimworld_bridge::PlantState],
+@@ -2602,9 +2628,14 @@ struct Cards<'a> {
+     lay: Option<Lay<'a>>,
+ }
+ 
+-/// Blocks an animal's or mech's picture spans for each cell RimWorld draws it across: as a
+-/// colonist, drawn about a cell tall, is about as tall as an MW2 soldier.
+-const PICTURE_SCALE: f32 = 3.0;
++/// Blocks a picture spans for each cell RimWorld draws it across: the floor's own scale, so an
++/// animal covers as many cells of floor as in RimWorld. People are then stood as tall as an MW2
++/// soldier, and animals and mechs grow or shrink by the same factor, so they keep RimWorld's
++/// size against people (M14: at 3 blocks a cell they were half again too big).
++const PICTURE_SCALE: f32 = CELL as f32;
++/// The factor people grow by to stand as tall as an MW2 soldier, before any is seen: a person
++/// is about 1.1 cells tall in RimWorld.
++const PEOPLE_SCALE: f32 = PERSON_HEIGHT / (1.1 * PICTURE_SCALE);
+ /// How tall a person's picture stands, in blocks: an MW2 soldier's 70 units.
+ const PERSON_HEIGHT: f32 = 70.0 / BLOCK;
+ /// A pawn just hurt flashes red for this many seconds, this much of green and blue gone at
+@@ -2638,7 +2669,7 @@ struct Card {
+ /// A figure's RimWorld picture as seen from `eye` (block space): its face seen from the
+ /// front, its back from behind, its side (east, mirrored for west) from either side, as
+ /// RimWorld draws it facing those ways. From nowhere in particular, its side.
+-fn card(figure: &Figure, cutouts: &HashMap<u16, [f32; 4]>, eye: Option<[f64; 3]>) -> Option<Card> {
++fn card(figure: &Figure, cutouts: &HashMap<u16, [f32; 4]>, eye: Option<[f64; 3]>, people: f32) -> Option<Card> {
+     let ([north, east, south], [dw, dh]) = (figure.art?, figure.draw?);
+     // Where the eye is around the figure, clockwise from where it faces.
+     let around = eye.map_or(90.0, |eye| {
+@@ -2655,12 +2686,31 @@ fn card(figure: &Figure, cutouts: &HashMap<u16, [f32; 4]>, eye: Option<[f64; 3]>
+     let bounds = *cutouts.get(&tex)?;
+     let width = dw * PICTURE_SCALE * (bounds[2] - bounds[0]);
+     let height = dh * PICTURE_SCALE * (bounds[3] - bounds[1]);
+-    // A person stands as tall as the MW2 player (M13); the rest keep RimWorld's sizes
+-    // against that.
+-    let scale = if figure.kind == Kind::Humanlike && height > 1e-3 { PERSON_HEIGHT / height } else { 1.0 };
++    // A person stands as tall as the MW2 player (M13); the rest grow as people did, so they
++    // keep RimWorld's sizes against them (M14).
++    let scale = if figure.kind == Kind::Humanlike && height > 1e-3 { PERSON_HEIGHT / height } else { people };
+     Some(Card { tex, flip, bounds, width: width * scale, height: height * scale })
+ }
+ 
++/// How much people grow to stand as tall as an MW2 soldier: the middle of what each person
++/// standing needs, from the side, or [`PEOPLE_SCALE`] while there is nobody to measure.
++fn people_scale<'a>(figures: impl Iterator<Item = &'a Figure>, cutouts: &HashMap<u16, [f32; 4]>) -> f32 {
++    let mut needs: Vec<f32> = figures
++        .filter(|figure| figure.kind == Kind::Humanlike && !figure.downed)
++        .filter_map(|figure| {
++            let ([_, east, _], [_, dh]) = (figure.art?, figure.draw?);
++            let bounds = cutouts.get(&u16::try_from(east).ok()?)?;
++            let height = dh * PICTURE_SCALE * (bounds[3] - bounds[1]);
++            (height > 1e-3).then(|| PERSON_HEIGHT / height)
++        })
++        .collect();
++    if needs.is_empty() {
++        return PEOPLE_SCALE;
++    }
++    needs.sort_by(f32::total_cmp);
++    needs[needs.len() / 2]
++}
++
+ /// A picture standing on the floor at `(x, z)` (block space), turned to face `eye`: `width`
+ /// by `height` blocks, showing `bounds` of small tile `tex`, mirrored with `flip`; flat on
+ /// the ground with `lying`. Both faces drawn.
+@@ -2898,7 +2948,7 @@ fn figure_mesh<'a>(figures: impl Iterator<Item = &'a Figure>, tracers: &[Tracer]
+         add_segment(&mut vertices, &mut indices, tail, head, SHELL_HALF_WIDTH, [0.22, 0.22, 0.2]);
+     }
+     for figure in figures {
+-        if let Some(card) = card(figure, cards.cutouts, cards.eye) {
++        if let Some(card) = card(figure, cards.cutouts, cards.eye, cards.people) {
+             let at = [figure.x, figure.z];
+             let red = 1.0 - HURT_RED * (figure.flash / HURT_FLASH).clamp(0.0, 1.0);
+             let color = [1.0, red, red, 1.0];
+@@ -3049,7 +3099,8 @@ fn minimap(lay: Lay) -> Image {
+         Extent3d { width: MINIMAP_PIXELS, height: MINIMAP_PIXELS, depth_or_array_layers: 1 },
+         TextureDimension::D2,
+         pixels,
+-        TextureFormat::Rgba8UnormSrgb,
++        // Drawn as the HUD draws MW2's own map pictures: as stored, not decoded from sRGB.
++        TextureFormat::Rgba8Unorm,
+         RenderAssetUsages::default(),
+     )
+ }
+@@ -3777,7 +3828,7 @@ mod tests {
+ 
+     fn no_cards() -> Cards<'static> {
+         static NONE: std::sync::OnceLock<HashMap<u16, [f32; 4]>> = std::sync::OnceLock::new();
+-        Cards { eye: None, cutouts: NONE.get_or_init(HashMap::new), items: &[], plants: &[], plant_art: None, lay: None }
++        Cards { eye: None, cutouts: NONE.get_or_init(HashMap::new), people: PEOPLE_SCALE, items: &[], plants: &[], plant_art: None, lay: None }
+     }
+ 
+     #[test]
+@@ -4024,6 +4075,7 @@ mod tests {
+         let cards = Cards {
+             eye: Some(middle(250)),
+             cutouts: &cutouts,
++            people: PEOPLE_SCALE,
+             items: &[],
+             plants: &plants,
+             plant_art: Some(&art),
+@@ -4074,6 +4126,35 @@ mod tests {
+         }
+     }
+ 
++    #[test]
++    fn animals_keep_rimworlds_size_against_people() {
++        // A person's portrait spans 2 cells and their body is 0.55 of it; a muffalo is drawn
++        // 3 cells across with its body 0.6 of that.
++        let cutouts: HashMap<u16, [f32; 4]> = [(1, [0.2, 0.2, 0.8, 0.75]), (2, [0.2, 0.2, 0.8, 0.8])].into();
++        let person = figure_of(&PawnState { art: Some([1, 1, 1]), draw: Some([2.0, 2.0]), ..pawn("p", 5.5, 5.5) }, 250);
++        let muffalo = figure_of(
++            &PawnState { kind: Some("animal".into()), art: Some([2, 2, 2]), draw: Some([3.0, 3.0]), ..pawn("m", 8.5, 5.5) },
++            250,
++        );
++        let people = people_scale([&person, &muffalo].into_iter(), &cutouts);
++        let tall = |figure: &Figure| card(figure, &cutouts, None, people).unwrap().height;
++        assert!((tall(&person) - PERSON_HEIGHT).abs() < 1e-4, "a person is as tall as the player");
++        // In RimWorld the muffalo is 1.8 cells tall to the person's 1.1: so here too.
++        let ratio = tall(&muffalo) / tall(&person);
++        assert!((ratio - 1.8 / 1.1).abs() < 1e-3, "{ratio}");
++    }
++
++    #[test]
++    fn a_colonist_trailing_the_player_is_not_held_back() {
++        let colonist = pawn("a", 10.0, 10.0);
++        // Running fast: the player is 5 cells on, but was by the colonist a moment ago.
++        let trail: std::collections::VecDeque<_> = [(0.4, [10.5, 10.0]), (0.2, [12.5, 10.0]), (0.0, [14.5, 10.0])].into();
++        assert!(!held_back(&colonist, [15.0, 10.0], &trail));
++        // RimWorld kept the colonist behind a wall while the player went on for a while.
++        let gone: std::collections::VecDeque<_> = [(0.4, [14.0, 10.0]), (0.0, [16.0, 10.0])].into();
++        assert!(held_back(&colonist, [17.0, 10.0], &gone));
++    }
++
+     #[test]
+     fn a_hurt_pawn_flashes_red_then_fades() {
+         let mut figures = HashMap::new();
+diff --git a/crates/rimworld_world/src/rimview.rs b/crates/rimworld_world/src/rimview.rs
+index 98994c0..58a2601 100644
+--- a/crates/rimworld_world/src/rimview.rs
++++ b/crates/rimworld_world/src/rimview.rs
+@@ -14,9 +14,9 @@ use crate::{FlatFloor, rimworld_block};
+ 
+ /// A `view` older than this many seconds is stale: the minimap shows the floor's own map.
+ pub(crate) const VIEW_SECONDS: f32 = 2.0;
+-/// The minimap shows the square inside the picture that stays inside it however the
+-/// minimap turns: 1/√2 of its side.
+-const TURNING: f32 = std::f32::consts::FRAC_1_SQRT_2;
++/// The minimap keeps north up as RimWorld does (M14), so it shows nearly the whole picture:
++/// a little is left for the picture trailing the player.
++const SHOWN: f32 = 0.92;
+ 
+ /// The latest picture of RimWorld, ready for the minimap.
+ #[derive(Clone)]
+@@ -47,7 +47,9 @@ pub(crate) fn decode(view: &View) -> Option<Image> {
+         Extent3d { width, height, depth_or_array_layers: 1 },
+         TextureDimension::D2,
+         pixels,
+-        TextureFormat::Rgba8UnormSrgb,
++        // The HUD draws map pictures as they are stored (MW2's own are), so RimWorld's colours
++        // go through untouched; as sRGB they were decoded once more and came out dark (M14).
++        TextureFormat::Rgba8Unorm,
+         RenderAssetUsages::default(),
+     ))
+ }
+@@ -68,7 +70,7 @@ pub(crate) fn corners(origin: [f64; 3], size: i32, view: &View) -> ([f32; 2], [f
+ 
+ /// How much of a picture `width` map units across the minimap shows.
+ pub(crate) fn range(width: f32) -> f32 {
+-    width * TURNING
++    width * SHOWN
+ }
+ 
+ /// A map point the player flies at, as a `spectate`.

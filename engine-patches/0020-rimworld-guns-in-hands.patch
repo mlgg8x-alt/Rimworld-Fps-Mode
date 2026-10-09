@@ -1,0 +1,194 @@
+diff --git a/crates/assets/src/session_load/match_walk.rs b/crates/assets/src/session_load/match_walk.rs
+index 6a96455..b05b26e 100644
+--- a/crates/assets/src/session_load/match_walk.rs
++++ b/crates/assets/src/session_load/match_walk.rs
+@@ -399,7 +399,11 @@ pub(super) async fn walk_prepared_match(
+     }
+     let mut scene_names = scripts.asset_names();
+     scene_names.extend(facts.objective_visuals.model_names().map(str::to_owned));
+-    common_scene_models.retain_names(&scene_names);
++    // The RimWorld floor keeps every common model (guns, bodies, gear) for RimWorld's
++    // things to wear, not only those the map's scripts name.
++    if !crate::minecraft_map::flat_load() {
++        common_scene_models.retain_names(&scene_names);
++    }
+     t5_scene_models.retain_names(&scene_names);
+     iw5_scene_models.retain_names(&scene_names);
+     match map_namespace {
+diff --git a/crates/rimworld_world/src/lib.rs b/crates/rimworld_world/src/lib.rs
+index 9788a9c..6043cd9 100644
+--- a/crates/rimworld_world/src/lib.rs
++++ b/crates/rimworld_world/src/lib.rs
+@@ -446,6 +446,8 @@ struct Figure {
+     kind: Kind,
+     side: SideColour,
+     downed: bool,
++    /// The MW2 version of the gun in its hands, by script name.
++    gun: Option<&'static str>,
+ }
+ 
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+@@ -1567,6 +1569,7 @@ fn figure_of(pawn: &PawnState, size: i32) -> Figure {
+             _ => SideColour::Neutral,
+         },
+         downed: pawn.downed,
++        gun: mw2_weapon(pawn.weapon.as_deref()),
+     }
+ }
+ 
+@@ -1875,6 +1878,8 @@ struct Soldiers {
+     clips: Option<Option<HashMap<Action, Clip>>>,
+     times: HashMap<Action, (f32, i16)>,
+     revision: u32,
++    /// Each gun's MW2 world model, once looked up; `None` inside when the match has none.
++    guns: HashMap<&'static str, Option<String>>,
+ }
+ 
+ /// The first animation `names` has of `wanted`'s list, else the first with all its words
+@@ -1891,8 +1896,16 @@ fn soldier_kit(bodies: &assets::PreparedBodies, hostile: bool) -> Option<(String
+     Some((kit.body.clone(), kit.head.clone()))
+ }
+ 
+-/// A soldier's model and pose: `body` with `head` on its neck, playing `clip` at `time`.
+-fn soldier_state(body: &str, head: Option<&str>, clip: &str, time: f32, revision: u32) -> xmodel_runtime::DObjSemanticState {
++/// A soldier's model and pose: `body` with `head` on its neck and `gun` (model, tag) in its
++/// right hand, playing `clip` at `time`.
++fn soldier_state(
++    body: &str,
++    head: Option<&str>,
++    gun: Option<(&str, &str)>,
++    clip: &str,
++    time: f32,
++    revision: u32,
++) -> xmodel_runtime::DObjSemanticState {
+     let mut state = xmodel_runtime::DObjSemanticState::one_leaf(body.to_owned(), clip.to_owned(), 1, revision, time);
+     if let Some(head) = head {
+         state.composition.models.push(xmodel_runtime::DObjModelDescriptor {
+@@ -1902,6 +1915,14 @@ fn soldier_state(body: &str, head: Option<&str>, clip: &str, time: f32, revision
+             ignore_collision: true,
+         });
+     }
++    if let Some((gun, tag)) = gun {
++        state.composition.models.push(xmodel_runtime::DObjModelDescriptor {
++            model: gun.to_owned(),
++            parent_model: Some(0),
++            attach_tag: Some(tag.to_owned()),
++            ignore_collision: true,
++        });
++    }
+     state
+ }
+ 
+@@ -1922,6 +1943,7 @@ fn place_soldiers(
+     bodies: Option<Res<assets::PreparedBodies>>,
+     xanims: Option<Res<assets::PreparedXAnims>>,
+     catalog: Option<Res<asset_world::MapXModelSceneCatalog>>,
++    weapons: Option<Res<assets::PreparedWeapons>>,
+     mut models: Query<(&mut render_scene::WorldScriptModelInstance, &mut Transform)>,
+     mut soldiers: Local<Soldiers>,
+ ) {
+@@ -1930,8 +1952,9 @@ fn place_soldiers(
+         for (_, soldier) in soldiers.by_pawn.drain() {
+             commands.entity(soldier.entity).despawn();
+         }
+-        // A new match may have other animations.
++        // A new match may have other animations and guns.
+         soldiers.clips = None;
++        soldiers.guns.clear();
+         floor.soldiers.clear();
+         return;
+     }
+@@ -1979,6 +2002,20 @@ fn place_soldiers(
+             continue;
+         }
+         let head = head.filter(|head| has(head));
++        let gun = figure.gun.and_then(|name| {
++            let model = soldiers.guns.entry(name).or_insert_with(|| {
++                let model = weapons.as_deref().and_then(|weapons| {
++                    let index = weapons.0.resolve_index(name).ok().flatten()?;
++                    weapons.0.world_model_of(index).map(str::to_owned)
++                });
++                let model = model.filter(|model| has(model));
++                diag::info!(Zone, "rimworld: soldiers hold {name} as {model:?}");
++                model
++            });
++            let model = model.clone()?;
++            let Some(asset_world::MapXModelSceneAsset::Iw4(skel)) = catalog.get_name(&body) else { return None };
++            Some((model, xmodel_runtime::tp_weapon_attach_tag(&skel.bone_names)?))
++        });
+         let transform = soldier_transform(origin, figure);
+         let speed = figure.vx.hypot(figure.vz);
+         let action = match () {
+@@ -1989,7 +2026,8 @@ fn place_soldiers(
+         let action = if clips.contains_key(&action) { action } else { Action::Stand };
+         let clip = &clips[&action];
+         let (anim_time, _) = soldiers.times.get(&action).copied().unwrap_or_default();
+-        let state = soldier_state(&body, head.as_deref(), &clip.name, anim_time, soldiers.revision);
++        let gun = gun.as_ref().map(|(model, tag)| (model.as_str(), *tag));
++        let state = soldier_state(&body, head.as_deref(), gun, &clip.name, anim_time, soldiers.revision);
+         let model = asset_world::MapXModelAssetKey(body.clone());
+         let [x, y, z] = transform.translation.to_array();
+         let lighting_origin = [x, y, z + 40.0];
+@@ -2045,7 +2083,8 @@ fn place_soldiers(
+ /// MW2 models for each RimWorld plant kind, from the stand-in map (Estate's forest has
+ /// pines, birches, oaks and bushes): any the map has, one picked per plant for variety,
+ /// standing this many blocks high when fully grown. A kind with none the map has borrows
+-/// the next kind's (palms and cacti have none in Estate).
++/// the next kind's (palms and cacti have none in Estate; they are looked for by name in the
++/// other maps' models).
+ const PLANT_KINDS: [(&str, &[&str], f32); 7] = [
+     ("pine", &["foliage_red_pine_med", "foliage_red_pine_lg", "foliage_red_pine_sm", "foliage_tree_green_pine_lg_a"], 9.0),
+     ("birch", &["foliage_tree_birch_green_1", "foliage_tree_river_birch_xl_a"], 8.0),
+@@ -2175,7 +2214,25 @@ fn place_plants(
+                     Some(asset_world::MapXModelSceneAsset::Iw4(skel)) if skel.pose.is_some() => Some((*name, model_height(skel)?)),
+                     _ => None,
+                 })
+-                .collect();
++                .collect::<Vec<_>>();
++            // With every MW2 map loaded, palms and cacti come from whichever map has them.
++            let found = if found.is_empty() && matches!(kind, "palm" | "cactus") {
++                let word = if kind == "palm" { "palm" } else { "cact" };
++                catalog
++                    .iter()
++                    .filter(|(key, _)| key.0.starts_with("foliage") && key.0.contains(word))
++                    .filter_map(|(key, asset)| match asset {
++                        asset_world::MapXModelSceneAsset::Iw4(skel) if skel.pose.is_some() => {
++                            // Named once a match; the list is short.
++                            Some((&*Box::leak(key.0.clone().into_boxed_str()), model_height(skel)?))
++                        }
++                        _ => None,
++                    })
++                    .take(6)
++                    .collect()
++            } else {
++                found
++            };
+             kinds.insert(kind, found);
+         }
+         diag::info!(Zone, "rimworld: plant models {kinds:?}");
+@@ -2619,13 +2676,23 @@ mod tests {
+ 
+     #[test]
+     fn a_soldier_wears_its_head_on_its_neck() {
+-        let state = soldier_state("mp_body_a", Some("head_a"), "pb_stand_alert", 0.25, 7);
++        let state = soldier_state("mp_body_a", Some("head_a"), None, "pb_stand_alert", 0.25, 7);
+         let models = &state.composition.models;
+         assert_eq!((models[0].model.as_str(), models[1].model.as_str()), ("mp_body_a", "head_a"));
+         assert_eq!((models[1].parent_model, models[1].attach_tag.as_deref()), (Some(0), Some("j_spine4")));
+         let leaf = &state.tree.as_ref().unwrap().nodes[0];
+         assert_eq!((leaf.clip.as_deref(), leaf.state.time), (Some("pb_stand_alert"), 0.25));
+-        assert_eq!(soldier_state("mp_body_a", None, "pb_stand_alert", 0.25, 7).composition.models.len(), 1);
++        assert_eq!(soldier_state("mp_body_a", None, None, "pb_stand_alert", 0.25, 7).composition.models.len(), 1);
++    }
++
++    #[test]
++    fn a_soldier_holds_its_gun_in_its_right_hand() {
++        let state = soldier_state("mp_body_a", Some("head_a"), Some(("weapon_m4", "tag_weapon_right")), "pb_stand_alert", 0.25, 7);
++        let gun = &state.composition.models[2];
++        assert_eq!(gun.model, "weapon_m4");
++        assert_eq!((gun.parent_model, gun.attach_tag.as_deref()), (Some(0), Some("tag_weapon_right")));
++        let pawn = PawnState { weapon: Some("Gun_AssaultRifle".into()), ..pawn("Human1", 1.0, 1.0) };
++        assert_eq!(figure_of(&pawn, 10).gun, Some("masada_mp"));
+     }
+ 
+     #[test]

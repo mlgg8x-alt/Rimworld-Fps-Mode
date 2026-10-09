@@ -1,0 +1,354 @@
+diff --git a/crates/rimworld_bridge/src/lib.rs b/crates/rimworld_bridge/src/lib.rs
+index 73a2a72..da86b6c 100644
+--- a/crates/rimworld_bridge/src/lib.rs
++++ b/crates/rimworld_bridge/src/lib.rs
+@@ -15,7 +15,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
+ 
+ use bevy::prelude::*;
+ use rwmw2_protocol::{DEFAULT_ADDR, Message, PROTOCOL_VERSION, Side};
+-pub use rwmw2_protocol::{BuildingState, ItemState, LookState, LootItem, LootKind, LootSource, Message as BridgeMessage, PawnState, PlantState, ShotResult, Stance, WearState, roof, terrain};
++pub use rwmw2_protocol::{BuildingState, PlantKindArt, ItemState, LookState, LootItem, LootKind, LootSource, Message as BridgeMessage, PawnState, PlantState, ShotResult, Stance, WearState, roof, terrain};
+ 
+ pub struct RimworldBridgePlugin;
+ 
+@@ -102,6 +102,11 @@ pub struct RimworldLink {
+     pub view: Option<Arc<View>>,
+     /// Counts `view` messages.
+     pub view_revision: u64,
++    /// What each kind of plant looks like in RimWorld, by kind, from the latest `plant_art`
++    /// (M10+); `grass` is the cover on grassy cells.
++    pub plant_art: Option<Arc<std::collections::HashMap<String, Vec<i32>>>>,
++    /// Counts `plant_art` messages.
++    pub plant_art_revision: u64,
+ }
+ 
+ /// A small picture of RimWorld's map around the MW2 player, for MW2's minimap.
+@@ -467,6 +472,13 @@ fn drain_inbox(inbox: Res<RimworldInbox>, mut link: ResMut<RimworldLink>) {
+                 link.view = Some(Arc::new(View { size, x, z, cells, jpg }));
+                 link.view_revision += 1;
+             }
++            BridgeEvent::Received(Message::PlantArt { kinds }) => {
++                if link.plant_art.is_none() {
++                    report(&format!("RimWorld's plant pictures: {} kinds", kinds.len()));
++                }
++                link.plant_art = Some(Arc::new(kinds.into_iter().map(|kind| (kind.kind, kind.tex)).collect()));
++                link.plant_art_revision += 1;
++            }
+             // Messages for RimWorld, not for the engine.
+             BridgeEvent::Received(_) => {}
+         }
+diff --git a/crates/rimworld_world/src/detail.rs b/crates/rimworld_world/src/detail.rs
+index 056df91..d5be889 100644
+--- a/crates/rimworld_world/src/detail.rs
++++ b/crates/rimworld_world/src/detail.rs
+@@ -487,15 +487,10 @@ fn model_of(building: &BuildingState, fences: &HashSet<(i32, i32)>) -> (Vec<Loca
+         }
+         return (parts.into_iter().map(|p| unturn(p, building.rot)).collect(), 1.3);
+     } else if has("trap") || has("spike") {
+-        // A low board studded with sharp stakes, leaning out.
+-        parts.push([0.08, 0.0, 0.08, 0.92, 0.08, 0.92]);
+-        for row in 0..3 {
+-            for col in 0..3 {
+-                let (u, v) = (0.2 + 0.3 * col as f32, 0.2 + 0.3 * row as f32);
+-                parts.push([u - 0.05, 0.08, v - 0.05, u + 0.05, 0.5, v + 0.05]);
+-                parts.push([u - 0.025, 0.5, v - 0.025, u + 0.025, 0.72, v + 0.025]);
+-            }
+-        }
++        // RimWorld's own picture of the trap, lying in its cell with its stakes raised a
++        // little: as flat as RimWorld draws it (M10).
++        parts.push([0.02, 0.0, 0.02, 0.98, 0.06, 0.98]);
++        parts.push([0.1, 0.06, 0.1, 0.9, 0.3, 0.9]);
+         body = 0.0;
+     } else if has("column") || has("pillar") {
+         parts.push([0.15, 0.0, 0.15, 0.85, BUILT_HEIGHT as f32, 0.85]);
+@@ -655,11 +650,10 @@ mod tests {
+     }
+ 
+     #[test]
+-    fn a_spike_trap_is_a_board_of_stakes_to_walk_over() {
++    fn a_spike_trap_lies_flat_enough_to_walk_over() {
+         let trap = building("TrapSpike", [2, 2, 2, 2], 0);
+         let (parts, body) = model_of(&trap, &HashSet::new());
+-        assert!(parts.len() > 10);
+-        assert!(parts.iter().any(|p| p[4] > 0.6), "stakes stand up");
+-        assert_eq!(body, 0.0);
++        assert!(parts.iter().all(|p| p[4] <= 0.3), "it lies flat: {parts:?}");
++        assert_eq!(body, 0.0, "nothing to walk into");
+     }
+ }
+diff --git a/crates/rimworld_world/src/lib.rs b/crates/rimworld_world/src/lib.rs
+index dc1cee8..1680694 100644
+--- a/crates/rimworld_world/src/lib.rs
++++ b/crates/rimworld_world/src/lib.rs
+@@ -183,8 +183,15 @@ const ROCK_HEIGHT: i32 = 4;
+ const BUILT_HEIGHT: i32 = 3;
+ /// A built roof's thickness, in blocks, on top of the walls.
+ const ROOF_THICKNESS: f32 = 0.25;
+-/// Cells a built floor's RimWorld art spans before it repeats.
+-const FLOOR_SPAN: i32 = 2;
++/// Cells a floor's RimWorld art spans before it repeats, and what the environment says
++/// instead (`RWMW2_FLOOR_SPAN`).
++const FLOOR_SPAN: i32 = 4;
++fn floor_span() -> i32 {
++    static SPAN: std::sync::OnceLock<i32> = std::sync::OnceLock::new();
++    *SPAN.get_or_init(|| {
++        std::env::var("RWMW2_FLOOR_SPAN").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(FLOOR_SPAN).clamp(1, 32)
++    })
++}
+ /// A cell grid line every this many cells, as RimWorld's own grid overlay.
+ const MAJOR_LINE: i32 = 10;
+ const FULL_BRIGHT: [u8; 2] = [15 * 16, 0];
+@@ -900,6 +907,8 @@ fn update(
+     sim::voxel::set_mob_boxes(
+         floor.targets.iter().enumerate().map(|(key, (_, _, bounds))| (key as u64, *bounds)).collect(),
+     );
++    // RimWorld's own pictures for its plants: then the trees are pictures, not MW2 models.
++    let plant_pictures = rimworld_pictures().1;
+     // Not the player's own colonist: that is the player.
+     let playing = floor.playing.as_deref();
+     view.entity_meshes[0] = figure_mesh(
+@@ -910,7 +919,14 @@ fn update(
+             .map(|(_, figure)| figure),
+         &floor.tracers,
+         &floor.shells,
+-        &Cards { eye: floor.eye, cutouts: &floor.cutouts, items: link.as_deref().and_then(|link| link.items.as_deref()).map_or(&[][..], Vec::as_slice) },
++        &Cards {
++            eye: floor.eye,
++            cutouts: &floor.cutouts,
++            items: link.as_deref().and_then(|link| link.items.as_deref()).map_or(&[][..], Vec::as_slice),
++            plants: plant_pictures.then(|| link.as_deref().and_then(|link| link.plants.as_deref())).flatten().map_or(&[][..], Vec::as_slice),
++            plant_art: plant_pictures.then(|| link.as_deref().and_then(|link| link.plant_art.as_deref())).flatten(),
++            lay: Some(floor.lay()),
++        },
+         size,
+     );
+ 
+@@ -1685,7 +1701,7 @@ fn add_block(mesh: &mut SectionMesh, lay: Lay, [x, y, z]: [i32; 3], cell: Cell,
+             (top, side)
+         }
+         Some(detail) if matches!(cell, Cell::Ground(_)) => {
+-            let floor = detail.floor(x, z).map(|s| Tex::Small(s, [FLOOR_SPAN * CELL; 2]));
++            let floor = detail.floor(x, z).map(|s| Tex::Small(s, [floor_span() * CELL; 2]));
+             (floor, floor)
+         }
+         _ => (None, None),
+@@ -2149,7 +2165,9 @@ fn tile_pixels(minecraft: Option<&std::path::Path>, mw2: &dyn Fn(&str) -> Option
+ /// An atlas of `pixels` and its mip levels.
+ fn finish_atlas(pixels: RgbaImage) -> Atlas {
+     let mut mipmaps: Vec<RgbaImage> = Vec::new();
+-    while mipmaps.last().unwrap_or(&pixels).width() > TILE_COLUMNS {
++    // One mip past a small tile of two pixels would mix neighbouring pictures together.
++    let levels = SMALL.ilog2().saturating_sub(1) as usize;
++    while mipmaps.len() < levels && mipmaps.last().unwrap_or(&pixels).width() > TILE_COLUMNS {
+         let from = mipmaps.last().unwrap_or(&pixels);
+         let (w, h) = (from.width() / 2, from.height() / 2);
+         let next = RgbaImage::from_fn(w, h, |x, y| {
+@@ -2386,11 +2404,16 @@ fn first_block(lay: Lay<'_>, from: Vec3, to: Vec3) -> Option<Vec3> {
+ }
+ 
+ /// What RimWorld's pictures on the floor need: the eye they turn to face (block space), the
+-/// solid part of each cut-out picture, and what lies on the ground.
++/// solid part of each cut-out picture, what lies on the ground, and what grows (M10).
+ struct Cards<'a> {
+     eye: Option<[f64; 3]>,
+     cutouts: &'a HashMap<u16, [f32; 4]>,
+     items: &'a [rimworld_bridge::ItemState],
++    /// Every tree and bush RimWorld sent, and what each kind looks like in RimWorld.
++    plants: &'a [rimworld_bridge::PlantState],
++    plant_art: Option<&'a HashMap<String, Vec<i32>>>,
++    /// The floor's cells, for the grass on grassy ones.
++    lay: Option<Lay<'a>>,
+ }
+ 
+ /// Blocks an animal's or mech's picture spans for each cell RimWorld draws it across: as a
+@@ -2498,11 +2521,83 @@ fn add_items(vertices: &mut Vec<Vertex>, indices: &mut Vec<u32>, cards: &Cards,
+     }
+ }
+ 
++/// Whether RimWorld's own pictures are used for its people and its plants, rather than MW2's
++/// soldiers and tree models: both on unless the environment says otherwise.
++fn rimworld_pictures() -> (bool, bool) {
++    static ON: std::sync::OnceLock<(bool, bool)> = std::sync::OnceLock::new();
++    *ON.get_or_init(|| {
++        let on = |name: &str| !matches!(std::env::var(name).map(|v| v.trim().to_lowercase()).as_deref(), Ok("0" | "off" | "false"));
++        let (people, plants) = (on("RWMW2_RIMWORLD_PAWNS"), on("RWMW2_RIMWORLD_PLANTS"));
++        diag::info!(Zone, "rimworld: RimWorld's own pictures for people {people}, for plants {plants}");
++        println!("[rimworld] RimWorld's own pictures: people {people}, plants {plants}");
++        (people, plants)
++    })
++}
++
++/// How many cells across RimWorld draws each kind of plant fully grown, and how little of
++/// that a seedling is.
++fn plant_cells(kind: &str) -> f32 {
++    match kind {
++        "pine" | "oak" | "birch" | "palm" => 2.6,
++        "dead" => 2.2,
++        "cactus" => 1.2,
++        "grass" => 0.8,
++        _ => 1.1,
++    }
++}
++const PLANT_LEAST: f32 = 0.35;
++/// Cells of grass a side between one grass picture and the next, and how far grass is drawn.
++const GRASS_STEP: i32 = 2;
++const GRASS_REACH: f32 = 60.0;
++
++/// Which of a kind's RimWorld pictures stands on cell `(x, z)`.
++fn plant_picture(art: &HashMap<String, Vec<i32>>, kind: &str, x: i32, z: i32) -> Option<u16> {
++    let pictures = art.get(kind).filter(|list| !list.is_empty())?;
++    let picture = pictures[(cell_hash(x, z, 7) * pictures.len() as f32) as usize % pictures.len()];
++    u16::try_from(picture).ok()
++}
++
++/// Everything that grows, as RimWorld's own picture of it standing on its cell: every tree
++/// and bush RimWorld sent, sized by how grown it is, and a scattering of grass over the
++/// grassy cells near the eye (RimWorld has no grass floor: it is ground with grass on it).
++fn add_plants(vertices: &mut Vec<Vertex>, indices: &mut Vec<u32>, cards: &Cards, size: i32) {
++    let Some(art) = cards.plant_art else { return };
++    let cell = CELL as f32;
++    let mut stand = |x: f32, z: f32, tex: u16, cells: f32| {
++        let Some(bounds) = cards.cutouts.get(&tex).copied() else { return };
++        let (w, h) = (bounds[2] - bounds[0], bounds[3] - bounds[1]);
++        let scale = cells * cell / w.max(h).max(1e-3);
++        let at = rimworld_block(size, x, 0.0, z);
++        add_card(vertices, indices, [at.x, at.z], cards.eye, tex, bounds, [w * scale, h * scale], false, false);
++    };
++    for plant in cards.plants {
++        let Some(tex) = plant_picture(art, &plant.kind, plant.x, plant.z) else { continue };
++        let grown = PLANT_LEAST + (1.0 - PLANT_LEAST) * plant.growth.clamp(0.0, 1.0);
++        stand(plant.x as f32 + 0.5, plant.z as f32 + 0.5, tex, plant_cells(&plant.kind) * grown);
++    }
++    // Grass, on the grassy cells around the eye.
++    let (Some(lay), Some(eye)) = (cards.lay, cards.eye) else { return };
++    let here = |p: f64| (p / f64::from(CELL)) as i32;
++    let (ex, ez) = (here(eye[0]), size - here(eye[2]));
++    let reach = GRASS_REACH as i32;
++    for z in (ez - reach..=ez + reach).step_by(GRASS_STEP as usize) {
++        for x in (ex - reach..=ex + reach).step_by(GRASS_STEP as usize) {
++            if lay.code(x * CELL, (size - 1 - z) * CELL) != Some(terrain::GRASS) {
++                continue;
++            }
++            let Some(tex) = plant_picture(art, "grass", x, z) else { continue };
++            let (jx, jz) = (cell_hash(x, z, 11), cell_hash(x, z, 13));
++            stand(x as f32 + jx, z as f32 + jz, tex, plant_cells("grass"));
++        }
++    }
++}
++
+ /// Every figure's and tracer's boxes, animals and mechs as their RimWorld pictures, and what
+ /// lies on the ground, as MinecraftOSS entity vertices and indices.
+ fn figure_mesh<'a>(figures: impl Iterator<Item = &'a Figure>, tracers: &[Tracer], shells: &[ShellFlight], cards: &Cards, size: i32) -> (Vec<u8>, Vec<u32>) {
+     let (mut vertices, mut indices) = (Vec::new(), Vec::new());
+     add_items(&mut vertices, &mut indices, cards, size);
++    add_plants(&mut vertices, &mut indices, cards, size);
+     for (tail, head) in tracers.iter().filter_map(Tracer::streak) {
+         add_segment(&mut vertices, &mut indices, tail, head, TRACER_HALF_WIDTH, [1.0, 0.86, 0.45]);
+     }
+@@ -2856,6 +2951,8 @@ fn place_soldiers(
+         soldiers.times.insert(*action, next);
+     }
+     let has = |name: &str| matches!(catalog.get_name(name), Some(asset_world::MapXModelSceneAsset::Iw4(_)));
++    // Someone RimWorld drew for us stands as that picture, not as an MW2 soldier (M10).
++    let pictured = |figure: &Figure| rimworld_pictures().0 && figure.art.is_some();
+     let playing = floor.playing.clone();
+     let slots = assets::rimworld_soldiers::soldier_slots();
+     let looks = link.as_deref().and_then(|link| link.looks.clone());
+@@ -2864,7 +2961,7 @@ fn place_soldiers(
+         floor
+             .figures
+             .iter()
+-            .filter(|(id, figure)| figure.kind == Kind::Humanlike && playing.as_deref() != Some(id.as_str()))
++            .filter(|(id, figure)| figure.kind == Kind::Humanlike && playing.as_deref() != Some(id.as_str()) && !pictured(figure))
+             .map(|(id, _)| id)
+             .filter(|id| looks.as_ref().is_some_and(|looks| looks.contains_key(*id))),
+         slots.as_ref().map_or(0, |slots| slots.slots),
+@@ -2872,7 +2969,7 @@ fn place_soldiers(
+     let mut shown = std::collections::HashSet::new();
+     let origin = floor.origin;
+     for (id, figure) in &floor.figures {
+-        if figure.kind != Kind::Humanlike || playing.as_deref() == Some(id.as_str()) {
++        if figure.kind != Kind::Humanlike || playing.as_deref() == Some(id.as_str()) || pictured(figure) {
+             continue;
+         }
+         let Some((body, head)) = soldier_kit(&bodies, figure.side == SideColour::Hostile) else { continue };
+@@ -3158,6 +3255,15 @@ fn place_plants(
+         );
+         kinds
+     });
++    // RimWorld's own pictures stand where the trees are (M10): no MW2 models, and the trees
++    // are no longer blocks either.
++    if rimworld_pictures().1 && link.as_deref().is_some_and(|link| link.plant_art.is_some()) {
++        for (_, plant) in plants.by_cell.drain() {
++            commands.entity(plant.entity).try_despawn();
++        }
++        floor.tree_models = true;
++        return;
++    }
+     let has_trees = ["pine", "oak", "birch"].iter().any(|kind| kinds.get(kind).is_some_and(|list| !list.is_empty()));
+     floor.tree_models = has_trees;
+     if !has_trees {
+@@ -3376,7 +3482,7 @@ mod tests {
+ 
+     fn no_cards() -> Cards<'static> {
+         static NONE: std::sync::OnceLock<HashMap<u16, [f32; 4]>> = std::sync::OnceLock::new();
+-        Cards { eye: None, cutouts: NONE.get_or_init(HashMap::new), items: &[] }
++        Cards { eye: None, cutouts: NONE.get_or_init(HashMap::new), items: &[], plants: &[], plant_art: None, lay: None }
+     }
+ 
+     #[test]
+@@ -3555,11 +3661,52 @@ mod tests {
+         assert!(mesh.vertices[..4].iter().all(|v| v.position[1] == 0.0));
+     }
+ 
++    /// Mips stop while RimWorld's small pictures are still two pixels each: one more level
++    /// would mix neighbouring pictures together, which showed on wall tops seen from far off.
+     #[test]
+-    fn atlas_mips_reach_one_pixel_a_tile() {
++    fn atlas_mips_stop_before_small_pictures_mix() {
+         let atlas = atlas();
+         let last = atlas.mipmaps.last().unwrap();
+-        assert_eq!((last.width(), last.height()), (TILE_COLUMNS, TILES / TILE_COLUMNS));
++        let shrunk = TILE * TILE_COLUMNS / last.width();
++        assert_eq!(SMALL / shrunk, 2, "a small picture is two pixels at the last mip");
++        assert!(atlas.mipmaps.windows(2).all(|pair| pair[0].width() == pair[1].width() * 2));
++    }
++
++    /// RimWorld's own pictures of what grows: a tree where RimWorld has one, sized by how
++    /// grown it is, and grass over the grassy cells around the eye.
++    #[test]
++    fn plants_stand_as_their_rimworld_pictures() {
++        let mut cutouts = HashMap::new();
++        cutouts.insert(3u16, [0.25, 0.1, 0.75, 0.9]);
++        cutouts.insert(4u16, [0.3, 0.4, 0.7, 0.9]);
++        let mut art = HashMap::new();
++        art.insert("oak".to_owned(), vec![3]);
++        art.insert("grass".to_owned(), vec![4]);
++        let plants = vec![rimworld_bridge::PlantState { x: 125, z: 125, kind: "oak".into(), growth: 1.0 }];
++        let grassy = Terrain { size: [250, 250], cells: vec![terrain::GRASS; 250 * 250] };
++        let cards = Cards {
++            eye: Some(middle(250)),
++            cutouts: &cutouts,
++            items: &[],
++            plants: &plants,
++            plant_art: Some(&art),
++            lay: Some(Lay { size: 250, terrain: Some(&grassy), detail: None }),
++        };
++        let (mut vertices, mut indices) = (Vec::new(), Vec::new());
++        add_plants(&mut vertices, &mut indices, &cards, 250);
++        // Four corners a card, both faces drawn.
++        let cards_drawn = vertices.len() / 4;
++        assert!(cards_drawn > 1, "the tree and some grass: {cards_drawn}");
++        assert_eq!(indices.len(), cards_drawn * 12);
++        let tallest = vertices.iter().map(|v| v.position[1]).fold(0.0f32, f32::max);
++        // The oak is about two and a half cells of blocks tall, the grass far less.
++        assert!(tallest > 3.0 && tallest < 7.0, "the oak stands {tallest} blocks tall");
++        // A seedling is smaller than a grown tree.
++        let seedling = vec![rimworld_bridge::PlantState { x: 125, z: 125, kind: "oak".into(), growth: 0.05 }];
++        let (mut small, mut small_indices) = (Vec::new(), Vec::new());
++        add_plants(&mut small, &mut small_indices, &Cards { plants: &seedling, lay: None, ..cards }, 250);
++        let short = small.iter().map(|v| v.position[1]).fold(0.0f32, f32::max);
++        assert!(short < tallest / 2.0, "a seedling is {short} to the oak's {tallest}");
+     }
+ 
+     #[test]

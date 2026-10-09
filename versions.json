@@ -1,0 +1,50 @@
+{
+  "_comment": "Pinned versions. Bump these deliberately and commit the change, so every contributor builds the same thing.",
+  "rimworld": {
+    "game_version": "1.6",
+    "ref_package": "Krafs.Rimworld.Ref",
+    "ref_package_version": "1.6.4871",
+    "harmony_package_version": "2.4.2"
+  },
+  "ilspycmd": {
+    "version": "11.1.0.9782",
+    "dotnet_required": "10.0",
+    "fallback_for_dotnet8": "9.1.0.7988"
+  },
+  "engine": {
+    "_comment": "IW4L base we build on: chasm's mashup (IW4L + MinecraftOSS block world). Cloned into <repo>/engine.",
+    "repo": "https://github.com/chasmlol/2010-rust-rewrite-mashup",
+    "commit": "f608f85e407ff1b7689d54a9aafdd16e95711ac4",
+    "license": "Apache-2.0"
+  },
+  "references": [
+    {
+      "name": "iw4L",
+      "repo": "https://github.com/vladtrc/iw4L",
+      "commit": "d352dbdfd8778f12b5f93908bb5ccbc55561acca",
+      "license": "Apache-2.0",
+      "why": "Upstream IW4L, to diff against the engine snapshot"
+    },
+    {
+      "name": "Multiplayer",
+      "repo": "https://github.com/rwmt/Multiplayer",
+      "commit": "4a3be276bbf90cc597abfa5b299935ca8eeeb285",
+      "license": "MIT",
+      "why": "How a mod hooks RimWorld's tick loop and syncs state out of process"
+    },
+    {
+      "name": "universal-modder",
+      "repo": "https://github.com/rehan-remade/universal-modder",
+      "commit": "8607693be42ce02442251f05e0495f58c2b77e5d",
+      "license": "MIT",
+      "why": "Working two-game bridge example (GTA V x Minecraft) and agent notes"
+    },
+    {
+      "name": "RimWorld-Mod-Tutorials",
+      "repo": "https://github.com/Zeta-of-the-rim/RimWorld-Mod-Tutorials",
+      "commit": "48d3cdeea9f16d2f430648a7c7041b3317e040e3",
+      "license": "none listed (read only)",
+      "why": "C# and Harmony patching basics"
+    }
+  ]
+}

@@ -1,0 +1,708 @@
+diff --git a/crates/hud/src/images.rs b/crates/hud/src/images.rs
+index 93270a3..2e498be 100644
+--- a/crates/hud/src/images.rs
++++ b/crates/hud/src/images.rs
+@@ -151,7 +151,12 @@ pub struct HudImages {
+ impl HudImages {
+     /// An image made at run time in a namespace, under a name of its own.
+     pub fn insert_runtime_in(&mut self, ns: AssetNamespace, name: &str, handle: Handle<Image>) {
+-        self.by_name.insert(iwd_key(ns, name, HudSampling::Color, None), Some(handle));
++        // Draw lists look images up by their native sampling (Data outside the zone's sRGB
++        // names), so the image answers to both, as in `insert_runtime`: with Color alone the
++        // minimap's picture was never found and only the player arrow showed.
++        for sampling in [HudSampling::Color, HudSampling::Data] {
++            self.by_name.insert(iwd_key(ns, name, sampling, None), Some(handle.clone()));
++        }
+     }
+ 
+     /// An image made at run time, drawn under a material name of its own.
+@@ -535,3 +540,19 @@ impl HudImages {
+         Some(handle)
+     }
+ }
++
++#[cfg(test)]
++mod runtime_image_tests {
++    use super::*;
++
++    #[test]
++    fn a_runtime_map_picture_is_found_by_draw_lists() {
++        let mut hud = HudImages::default();
++        let mut images = Assets::<Image>::default();
++        let handle = images.add(Image::default());
++        let ns = hud.map_namespace();
++        hud.insert_runtime_in(ns, "mc_minimap", handle.clone());
++        assert_eq!(hud.get_native(ns, "mc_minimap", &mut images), Some(handle.clone()));
++        assert_eq!(hud.get(ns, "mc_minimap", &mut images), Some(handle));
++    }
++}
+diff --git a/crates/hud/src/menus/mod.rs b/crates/hud/src/menus/mod.rs
+index 46cf96f..2d2e7d1 100644
+--- a/crates/hud/src/menus/mod.rs
++++ b/crates/hud/src/menus/mod.rs
+@@ -267,6 +267,10 @@ pub(crate) fn update_script_menus(
+         }
+         runner.menus.applied_serial = command.serial;
+         match &command.kind {
++            // RimWorld's map has no classes or teams: MW2's script still asks (M13).
++            sim::MenuCommandKind::Open(name) if runner.world.rimworld_floor && rimworld::not_here(name) => {
++                diag::info!(Ui, "menu open skipped on RimWorld's map: {name}");
++            }
+             sim::MenuCommandKind::Open(name) => runner.open(name),
+             sim::MenuCommandKind::ClosePopup => {
+                 if let Some(top) = runner.menus.stack.last().map(|m| m.name.clone()) {
+@@ -277,6 +281,15 @@ pub(crate) fn update_script_menus(
+         }
+     }
+ 
++    // And any opened before the map was known to be RimWorld's.
++    if runner.world.rimworld_floor {
++        let asked: Vec<String> =
++            runner.menus.stack.iter().map(|menu| menu.name.clone()).filter(|name| rimworld::not_here(name)).collect();
++        for name in asked {
++            diag::info!(Ui, "menu closed on RimWorld's map: {name}");
++            runner.close(&name);
++        }
++    }
+     let console_open = input.hud_input.as_ref().is_some_and(|h| h.console_open);
+     let mut pressed = Pressed::default();
+     for request in requests {
+diff --git a/crates/hud/src/menus/rimworld.rs b/crates/hud/src/menus/rimworld.rs
+index dbfa846..cd0545a 100644
+--- a/crates/hud/src/menus/rimworld.rs
++++ b/crates/hud/src/menus/rimworld.rs
+@@ -7,3 +7,21 @@
+ 
+ /// The Escape menu on RimWorld's map.
+ pub(crate) const PAUSE_MENU: &str = "rimworld_pause";
++
++/// Whether MW2's menu `name` asks for a class or a team, which RimWorld's map has none of:
++/// the script's prompts for them are not shown there (M13).
++pub(crate) fn not_here(name: &str) -> bool {
++    let name = name.to_ascii_lowercase();
++    name.contains("class") || name.starts_with("team_") || name == "muteplayer"
++}
++
++#[cfg(test)]
++mod tests {
++    #[test]
++    fn class_and_team_prompts_are_not_for_rimworld() {
++        assert!(super::not_here("changeclass"));
++        assert!(super::not_here("team_marinesopfor"));
++        assert!(!super::not_here(super::PAUSE_MENU));
++        assert!(!super::not_here("pc_options_video"));
++    }
++}
+diff --git a/crates/rimworld_bridge/src/lib.rs b/crates/rimworld_bridge/src/lib.rs
+index 02a34ac..d97b054 100644
+--- a/crates/rimworld_bridge/src/lib.rs
++++ b/crates/rimworld_bridge/src/lib.rs
+@@ -87,8 +87,11 @@ pub struct RimworldLink {
+     pub skins: Option<Arc<Skins>>,
+     /// Everything built but walls, doors and rock, from the latest `buildings` (M5+).
+     pub buildings: Option<Arc<Vec<BuildingState>>>,
+-    /// Counts `roofs`, `textures`, `skins` and `buildings` messages.
++    /// Counts `roofs`, `skins` and `buildings` messages: what the floor is built from.
+     pub world_revision: u64,
++    /// Counts `textures` messages (M13: new art for a pawn needs only the atlas made again,
++    /// not the floor; the mod sends art before anything that names it).
++    pub textures_revision: u64,
+     /// Everything lying on the ground, from the latest `items` (M6+).
+     pub items: Option<Arc<Vec<ItemState>>>,
+     /// Counts `items` messages.
+@@ -116,9 +119,10 @@ pub struct RimworldLink {
+     /// game seconds per real second, from the latest snapshot (M12+).
+     pub player_speed: Option<f32>,
+     pub rate: Option<f32>,
+-    /// How brightly lamps light every roofed cell, from the latest `glow` (M12+). Counted in
+-    /// `world_revision`.
++    /// How brightly lamps light every roofed cell, from the latest `glow` (M12+).
+     pub glow: Option<Arc<Glow>>,
++    /// Counts changes to `glow` (M13: only the light changes, not the floor).
++    pub glow_revision: u64,
+ }
+ 
+ /// MW2's own window (a Windows handle), once the engine has found it: its `hello` tells
+@@ -529,7 +533,7 @@ fn drain_inbox(inbox: Res<RimworldInbox>, mut link: ResMut<RimworldLink>) {
+                 let glow = Glow::new(size, &cells);
+                 if link.glow.as_deref() != Some(&glow) {
+                     link.glow = Some(Arc::new(glow));
+-                    link.world_revision += 1;
++                    link.glow_revision += 1;
+                 }
+             }
+             BridgeEvent::Received(Message::Textures { dir, names }) => {
+@@ -537,7 +541,7 @@ fn drain_inbox(inbox: Res<RimworldInbox>, mut link: ResMut<RimworldLink>) {
+                     report(&format!("RimWorld art: {} pictures in {dir}", names.len()));
+                 }
+                 link.textures = Some(Arc::new(Textures { dir, names }));
+-                link.world_revision += 1;
++                link.textures_revision += 1;
+             }
+             BridgeEvent::Received(Message::Skins { size, walls, floors }) => {
+                 let [x, z] = size;
+diff --git a/crates/rimworld_world/src/detail.rs b/crates/rimworld_world/src/detail.rs
+index 58cb945..d9c4018 100644
+--- a/crates/rimworld_world/src/detail.rs
++++ b/crates/rimworld_world/src/detail.rs
+@@ -85,8 +85,10 @@ pub(crate) struct Part {
+     /// Its picture's small tile, or plain when RimWorld sent none.
+     pub(crate) tex: Option<u16>,
+     pub(crate) sprite: Sprite,
+-    /// How light it is: darker under a roof.
++    /// How light it is: darker under a roof, lighter by a lamp.
+     pub(crate) light: f32,
++    /// The block point its light is taken at: its building's middle.
++    pub(crate) at: (i32, i32),
+ }
+ 
+ /// RimWorld's world over the terrain codes, cell by cell, in block space.
+@@ -210,7 +212,7 @@ impl Detail {
+             for part in parts {
+                 let bounds = place(part, rect, building.rot);
+                 detail.max_top = detail.max_top.max(bounds[4].ceil() as i32);
+-                list.push(Part { bounds, tex, sprite, light });
++                list.push(Part { bounds, tex, sprite, light, at: (mx, mz) });
+             }
+         }
+         detail
+@@ -236,6 +238,24 @@ impl Detail {
+         }
+     }
+ 
++    /// This world lit by `glow` instead (M13): only the light changes, so a lamp switching on
++    /// or a fire spreading costs no more than the chunks it lights.
++    pub(crate) fn with_glow(&self, glow: Option<&Glow>) -> Self {
++        let mut lit = self.clone();
++        let size = self.size;
++        lit.lit = glow.map(|glow| {
++            (0..size * size).map(|i| (glow.at(i % size, size - 1 - i / size) * 15.0).round() as u8).collect()
++        });
++        let light = |x: i32, z: i32| lit.light(x, z);
++        let parts: HashMap<(i32, i32), Vec<Part>> = lit
++            .parts
++            .iter()
++            .map(|(&chunk, parts)| (chunk, parts.iter().map(|part| Part { light: light(part.at.0, part.at.1), ..part.clone() }).collect()))
++            .collect();
++        lit.parts = parts;
++        lit
++    }
++
+     /// Whether a shelf stands on RimWorld cell `(x, z)` (`z` north).
+     pub(crate) fn shelf(&self, x: i32, z: i32) -> bool {
+         self.shelves.contains(&(x, z))
+@@ -691,6 +711,18 @@ mod tests {
+         assert_eq!(detail.light(b(1), b(1)), UNDER_ROOF);
+     }
+ 
++    #[test]
++    fn relighting_changes_only_the_light() {
++        let roofs = Roofs { size: [3, 3], cells: vec![roof::BUILT; 9], hills: 1 };
++        let lamp = building("Bed", [1, 1, 1, 1], 0);
++        let dark = Glow::new([3, 3], "000000000");
++        let lit = Glow::new([3, 3], "0000f0000");
++        let before = Detail::new(3, None, Some(&roofs), None, &[lamp.clone()], &[], Some(&dark));
++        let after = before.with_glow(Some(&lit));
++        assert_eq!(after, Detail::new(3, None, Some(&roofs), None, &[lamp], &[], Some(&lit)));
++        assert_eq!(after.light(b(1), b(1)), 1.0);
++    }
++
+     #[test]
+     fn shelves_are_known_by_their_cells() {
+         let detail = Detail::new(10, None, None, None, &[building("Shelf", [3, 4, 4, 4], 0)], &[], None);
+diff --git a/crates/rimworld_world/src/lib.rs b/crates/rimworld_world/src/lib.rs
+index 1b5b012..5c9a65b 100644
+--- a/crates/rimworld_world/src/lib.rs
++++ b/crates/rimworld_world/src/lib.rs
+@@ -269,6 +269,7 @@ impl Plugin for RimworldWorldPlugin {
+                 rimview::tab_to_rimworld.after(update).in_set(frame::ClientSet::Present),
+                 rimview::one_window.after(update).in_set(frame::ClientSet::Present),
+                 use_key.after(update).in_set(frame::ClientSet::Present),
++                skip_class_select.in_set(frame::ClientSet::Present),
+                 spectate_camera
+                     .after(update)
+                     .after(render_anim::sync_camera_from_presented)
+@@ -301,6 +302,29 @@ fn use_key(
+     }
+ }
+ 
++/// RimWorld's map has no classes: MW2's class select is answered at once with the first
++/// class, as the `spawn &` console command does (M13). The colonist's own gun replaces it.
++fn skip_class_select(
++    floor: Res<FlatFloor>,
++    screen: Option<Res<frame::AppScreen>>,
++    time: Res<Time>,
++    mut exec: MessageWriter<frame::UiExecCommand>,
++    mut wait: Local<f32>,
++) {
++    if (!floor.active && !floor.pending) || screen.is_none_or(|screen| *screen != frame::AppScreen::ClassSelect) {
++        *wait = 0.0;
++        return;
++    }
++    *wait -= time.delta_secs();
++    if *wait > 0.0 {
++        return;
++    }
++    // Again if it has not taken after a while.
++    *wait = 2.0;
++    diag::info!(World, "rimworld: skipping MW2's class select");
++    exec.write(frame::UiExecCommand { text: "spawn &".into() });
++}
++
+ fn sync_loot(
+     floor: Res<FlatFloor>,
+     link: Option<Res<RimworldLink>>,
+@@ -405,6 +429,9 @@ pub struct FlatFloor {
+     /// them; the art the atlas holds, and the atlas.
+     detail: Option<Arc<Detail>>,
+     world_revision: u64,
++    /// The link's revisions of its art and of its lamps' glow (M13), each handled alone.
++    textures_revision: u64,
++    glow_revision: u64,
+     textures: Option<Arc<Textures>>,
+     atlas: Option<Arc<Atlas>>,
+     /// The cut-out pictures' solid parts: see [`atlas_with`].
+@@ -725,6 +752,8 @@ fn update(
+         floor.terrain = link.as_deref().and_then(|link| link.terrain.clone());
+         floor.terrain_revision = link.as_deref().map_or(0, |link| link.terrain_revision);
+         floor.world_revision = link.as_deref().map_or(0, |link| link.world_revision);
++        floor.textures_revision = link.as_deref().map_or(0, |link| link.textures_revision);
++        floor.glow_revision = link.as_deref().map_or(0, |link| link.glow_revision);
+         floor.detail = detail_of(floor.size, floor.terrain.as_deref(), link.as_deref());
+         refresh_atlas(&mut floor, link.as_deref());
+         build(&floor, authority, &mut view);
+@@ -769,6 +798,31 @@ fn update(
+             println!("[rimworld] the floor is now RimWorld's terrain");
+         }
+     }
++    // New art, as for a pawn come into view (M13): the atlas again, not the floor.
++    if floor.active
++        && let Some(link) = link.as_deref()
++        && link.textures_revision != floor.textures_revision
++    {
++        floor.textures_revision = link.textures_revision;
++        if refresh_atlas(&mut floor, Some(link)) {
++            view.atlas = floor.atlas.clone();
++        }
++    }
++    // A lamp went on or off, or a fire spread (M13): only the chunks whose light changed.
++    if floor.active
++        && let Some(link) = link.as_deref()
++        && link.glow_revision != floor.glow_revision
++    {
++        floor.glow_revision = link.glow_revision;
++        if let Some(old) = floor.detail.clone() {
++            floor.detail = Some(Arc::new(old.with_glow(link.glow.as_deref())));
++            let was = Lay { size: floor.size, terrain: floor.terrain.as_deref(), detail: Some(&old), doors: floor.doors.as_deref() };
++            let chunks = changed_chunks(was, floor.lay());
++            if !chunks.is_empty() {
++                build_chunks(&floor, &mut view, chunks);
++            }
++        }
++    }
+     // A door swung open or shut: the blocks in its cell go, or come back (M11).
+     if floor.active
+         && let Some(link) = link.as_deref()
+@@ -1385,6 +1439,8 @@ fn stop(floor: &mut FlatFloor, view: &mut MinecraftWorldView, ui: Option<&mut fr
+     floor.terrain_revision = 0;
+     floor.detail = None;
+     floor.world_revision = 0;
++    floor.textures_revision = 0;
++    floor.glow_revision = 0;
+     if !floor.active {
+         return;
+     }
+@@ -1534,6 +1590,11 @@ const DOOR_OPEN: f32 = 0.5;
+ /// The blocks under a door's lintel: the gap a pawn walks through once it is open.
+ const DOOR_GAP: i32 = 2;
+ 
++/// A shut door's block below its lintel, which `add_doors` draws as leaves.
++fn leaf_block(cell: Cell, y: i32) -> bool {
++    cell == Cell::Column(terrain::DOOR) && (0..DOOR_GAP).contains(&y)
++}
++
+ /// The blocks a terrain code stands on its cell, by height above the floor.
+ fn column(code: u8) -> std::ops::Range<i32> {
+     match code {
+@@ -1620,16 +1681,12 @@ fn build_chunks(floor: &FlatFloor, view: &mut MinecraftWorldView, chunks: impl I
+         for z in 0..16 {
+             for x in 0..16 {
+                 let (bx, bz) = (cx * 16 + x, cz * 16 + z);
+-                let low = lay.detail.is_some_and(|detail| detail.model(bx, bz) == Model::Low);
+                 for y in min_y..min_y + height {
+                     let cell = lay.cell(bx, y, bz);
+                     if cell == Cell::Air {
+                         continue;
+                     }
+-                    // A model low enough to step over, as a bed or a trap, is walked through, as
+-                    // RimWorld's pawns walk over them.
+-                    let low_cover = low && cell == Cell::Column(terrain::COVER);
+-                    shapes[(((y - min_y) * 16 + z) * 16 + x) as usize] = if low_cover { 0 } else { shape(cell) };
++                    shapes[(((y - min_y) * 16 + z) * 16 + x) as usize] = shape(cell);
+                     // A tree drawn as an MW2 model has no blocks.
+                     if floor.tree_models && cell == Cell::Column(terrain::TREE) {
+                         continue;
+@@ -1715,10 +1772,12 @@ fn trunk(cell: Cell, y: i32) -> bool {
+ }
+ 
+ /// A block's `sim::voxel` shape: a full block, nothing to collide with for a tree (RimWorld's
+-/// pawns walk through trees, slowly: see [`match_colonist_speed`]), or a roof's slab.
++/// pawns walk through trees, slowly: see [`match_colonist_speed`]) or for cover (sandbags,
++/// furniture, beds: everything RimWorld's pawns walk through, as the mod sends what blocks
++/// them as a machine), or a roof's slab.
+ fn shape(cell: Cell) -> u16 {
+     match cell {
+-        Cell::Column(terrain::TREE) => 0,
++        Cell::Column(terrain::TREE | terrain::COVER) => 0,
+         Cell::Roof => SHAPE_ROOF,
+         _ => SHAPE_FULL,
+     }
+@@ -1755,8 +1814,16 @@ fn add_block(mesh: &mut SectionMesh, lay: Lay, [x, y, z]: [i32; 3], cell: Cell,
+     let (west, north) = (x.rem_euclid(CELL) == 0, z.rem_euclid(CELL) == 0);
+     // A trunk hides nothing around it, and nothing hides a trunk's sides.
+     let thin = trunk(cell, y);
++    // A shut door's leaves are drawn as figures (`add_doors`), so its blocks below the lintel
++    // only hold the player back: they show nothing and hide nothing.
++    if leaf_block(cell, y) {
++        return;
++    }
+     let solid = |dx: i32, dy: i32, dz: i32| {
+         let next = lay.cell(x + dx, y + dy, z + dz);
++        if leaf_block(next, y + dy) {
++            return false;
++        }
+         // A roof's slab hides only the top of what is under it, and its own sides against
+         // the next roof.
+         if next == Cell::Roof {
+@@ -1786,6 +1853,17 @@ fn add_block(mesh: &mut SectionMesh, lay: Lay, [x, y, z]: [i32; 3], cell: Cell,
+         _ => false,
+     };
+     let (top, side) = match lay.detail {
++        // A door's lintel is the wall it is set in: the door's own art is its leaves.
++        Some(detail) if cell == Cell::Column(terrain::DOOR) => {
++            let own = detail.wall(x, z);
++            let beside = [(CELL, 0), (-CELL, 0), (0, CELL), (0, -CELL)]
++                .into_iter()
++                .find(|&(dx, dz)| lay.cell(x + dx, y, z + dz) == Cell::Column(terrain::WALL) && detail.wall(x + dx, z + dz).is_some());
++            let (wx, wz) = beside.map_or((x, z), |(dx, dz)| (x + dx, z + dz));
++            let top = detail.wall(wx, wz).or(own).map(|s| Tex::Small(s, [CELL, CELL]));
++            let side = beside.and_then(|_| detail.wall_side(wx, wz)).map(|s| Tex::Small(s, [CELL, BUILT_HEIGHT])).or(top);
++            (top, side)
++        }
+         Some(detail) if wall_like => {
+             let top = detail.wall(x, z).map(|s| Tex::Small(s, [CELL, CELL]));
+             let side = detail.wall_side(x, z).map(|s| Tex::Small(s, [CELL, BUILT_HEIGHT])).or(top);
+@@ -1948,6 +2026,25 @@ fn base_pixels() -> &'static RgbaImage {
+ ///
+ /// A linked wall's face piece (`..._l11`) is replaced by [`face_picture`]: its face alone,
+ /// for the wall's sides.
++/// One of RimWorld's pictures, `SMALL` square. Each file is read once (M13): the atlas is
++/// made again whenever RimWorld saves a new picture, as for every raider of a raid, and
++/// reading all of them again each time stalled the game.
++fn read_picture(path: &std::path::Path) -> Option<RgbaImage> {
++    static READ: std::sync::LazyLock<std::sync::Mutex<HashMap<std::path::PathBuf, RgbaImage>>> =
++        std::sync::LazyLock::new(Default::default);
++    if let Some(picture) = READ.lock().ok()?.get(path) {
++        return Some(picture.clone());
++    }
++    let picture = image::open(path).ok()?.to_rgba8();
++    let picture = if picture.dimensions() == (SMALL, SMALL) {
++        picture
++    } else {
++        image::imageops::resize(&picture, SMALL, SMALL, image::imageops::FilterType::Triangle)
++    };
++    READ.lock().ok()?.insert(path.to_path_buf(), picture.clone());
++    Some(picture)
++}
++
+ fn atlas_with(textures: Option<&Textures>) -> (Atlas, HashMap<u16, [f32; 4]>) {
+     let mut pixels = base_pixels().clone();
+     let mut cutouts = HashMap::new();
+@@ -1957,14 +2054,7 @@ fn atlas_with(textures: Option<&Textures>) -> (Atlas, HashMap<u16, [f32; 4]>) {
+     let count = textures.names.len().min(usize::from(detail::SMALL_TILES));
+     let mut pictures: Vec<Option<RgbaImage>> = textures.names[..count]
+         .iter()
+-        .map(|name| {
+-            let picture = image::open(std::path::Path::new(&textures.dir).join(format!("{name}.png"))).ok()?.to_rgba8();
+-            Some(if picture.dimensions() == (SMALL, SMALL) {
+-                picture
+-            } else {
+-                image::imageops::resize(&picture, SMALL, SMALL, image::imageops::FilterType::Triangle)
+-            })
+-        })
++        .map(|name| read_picture(&std::path::Path::new(&textures.dir).join(format!("{name}.png"))))
+         .collect();
+     let missing = pictures.iter().filter(|p| p.is_none()).count();
+     if missing > 0 {
+@@ -2514,7 +2604,9 @@ struct Cards<'a> {
+ 
+ /// Blocks an animal's or mech's picture spans for each cell RimWorld draws it across: as a
+ /// colonist, drawn about a cell tall, is about as tall as an MW2 soldier.
+-const PICTURE_SCALE: f32 = 1.5;
++const PICTURE_SCALE: f32 = 3.0;
++/// How tall a person's picture stands, in blocks: an MW2 soldier's 70 units.
++const PERSON_HEIGHT: f32 = 70.0 / BLOCK;
+ /// A pawn just hurt flashes red for this many seconds, this much of green and blue gone at
+ /// first, as RimWorld's damage flash (M12).
+ const HURT_FLASH: f32 = 0.35;
+@@ -2525,6 +2617,8 @@ const WHITE: [f32; 4] = [1.0; 4];
+ const ITEM_SIZE: f32 = 0.6;
+ /// The longer side of something stored on a shelf: under the 0.54 blocks between its boards.
+ const SHELF_ITEM_SIZE: f32 = 0.45;
++/// The longer side of a stone chunk lying on the ground, in blocks: most of its cell.
++const CHUNK_SIZE: f32 = 1.5;
+ const ITEM_REACH: f32 = 120.0;
+ const MAX_ITEMS: usize = 3000;
+ 
+@@ -2561,12 +2655,15 @@ fn card(figure: &Figure, cutouts: &HashMap<u16, [f32; 4]>, eye: Option<[f64; 3]>
+     let bounds = *cutouts.get(&tex)?;
+     let width = dw * PICTURE_SCALE * (bounds[2] - bounds[0]);
+     let height = dh * PICTURE_SCALE * (bounds[3] - bounds[1]);
+-    Some(Card { tex, flip, bounds, width, height })
++    // A person stands as tall as the MW2 player (M13); the rest keep RimWorld's sizes
++    // against that.
++    let scale = if figure.kind == Kind::Humanlike && height > 1e-3 { PERSON_HEIGHT / height } else { 1.0 };
++    Some(Card { tex, flip, bounds, width: width * scale, height: height * scale })
+ }
+ 
+ /// A picture standing on the floor at `(x, z)` (block space), turned to face `eye`: `width`
+-/// by `height` blocks, showing `bounds` of small tile `tex`, mirrored with `flip`; lying on
+-/// its side with `lying`. Both faces drawn.
++/// by `height` blocks, showing `bounds` of small tile `tex`, mirrored with `flip`; flat on
++/// the ground with `lying`. Both faces drawn.
+ #[allow(clippy::too_many_arguments)]
+ fn add_card(
+     vertices: &mut Vec<Vertex>,
+@@ -2582,17 +2679,28 @@ fn add_card(
+     color: [f32; 4],
+ ) {
+     // Across the view, to its right.
+-    let look = eye.map_or(Vec2::new(0.0, -1.0), |eye| Vec2::new(x - eye[0] as f32, z - eye[2] as f32)).normalize_or(Vec2::new(0.0, -1.0));
++    // Standing, it turns to the eye; lying, it keeps still, head east, as RimWorld lays things.
++    let look = match eye {
++        Some(eye) if !lying => Vec2::new(x - eye[0] as f32, z - eye[2] as f32).normalize_or(Vec2::new(0.0, -1.0)),
++        _ => Vec2::new(0.0, -1.0),
++    };
+     let right = Vec2::new(-look.y, look.x);
+     let (u0, u1) = if flip { (u1, u0) } else { (u0, u1) };
+-    // Bottom left, bottom right, top right, top left on the screen, and the picture there.
+-    let (across, up) = if lying { (height, width) } else { (width, height) };
+-    let pictured = if lying { [[u1, v1], [u1, v0], [u0, v0], [u0, v1]] } else { [[u0, v1], [u1, v1], [u1, v0], [u0, v0]] };
+-    let corners = [(-across / 2.0, 0.0), (across / 2.0, 0.0), (across / 2.0, up), (-across / 2.0, up)];
++    // The picture's corners, bottom left, bottom right, top right, top left, and where each
++    // goes: across the view, along it, and up.
++    let pictured = [[u0, v1], [u1, v1], [u1, v0], [u0, v0]];
++    let corners: [(f32, f32, f32); 4] = if lying {
++        // Flat on the ground (M13), head to the right as seen, as RimWorld lays a downed pawn.
++        let (w, h) = (width / 2.0, height / 2.0);
++        [(-h, -w, 0.03), (-h, w, 0.03), (h, w, 0.03), (h, -w, 0.03)]
++    } else {
++        let w = width / 2.0;
++        [(-w, 0.0, 0.01), (w, 0.0, 0.01), (w, 0.0, height + 0.01), (-w, 0.0, height + 0.01)]
++    };
+     let base = vertices.len() as u32;
+-    for ((r, y), uv) in corners.into_iter().zip(pictured) {
++    for ((r, f, y), uv) in corners.into_iter().zip(pictured) {
+         vertices.push(Vertex {
+-            position: [x + right.x * r, y + lift + 0.01, z + right.y * r],
++            position: [x + right.x * r + look.x * f, y + lift, z + right.y * r + look.y * f],
+             uv: small_uv(tex, uv),
+             color,
+             sky_light: 15.0,
+@@ -2611,7 +2719,7 @@ fn add_items(vertices: &mut Vec<Vertex>, indices: &mut Vec<u32>, cards: &Cards,
+     let eye = cards.eye.map_or(Vec2::ZERO, |eye| Vec2::new(eye[0] as f32, eye[2] as f32));
+     let shelf = |x: i32, z: i32| cards.lay.and_then(|lay| lay.detail).is_some_and(|detail| detail.shelf(x, z));
+     let mut stacks: HashMap<(i32, i32), usize> = HashMap::new();
+-    let mut near: Vec<(f32, Vec3, u16, [f32; 4], f32, f32)> = cards
++    let mut near: Vec<(f32, Vec3, u16, [f32; 4], f32, f32, bool)> = cards
+         .items
+         .iter()
+         .filter_map(|item| {
+@@ -2619,22 +2727,25 @@ fn add_items(vertices: &mut Vec<Vertex>, indices: &mut Vec<u32>, cards: &Cards,
+             let bounds = *cards.cutouts.get(&tex)?;
+             let at = rimworld_block(size, item.x as f32 + 0.5, 0.0, item.z as f32 + 0.5);
+             let distance = Vec2::new(at.x, at.z).distance(eye);
+-            let (lift, most) = if shelf(item.x, item.z) {
++            let (lift, most, flat) = if shelf(item.x, item.z) {
+                 let slot = stacks.entry((item.x, item.z)).or_default();
+                 let board = detail::SHELF_BOARDS[*slot % (detail::SHELF_BOARDS.len() - 1)];
+                 *slot += 1;
+-                (board + detail::SHELF_BOARD, SHELF_ITEM_SIZE)
++                (board + detail::SHELF_BOARD, SHELF_ITEM_SIZE, false)
++            } else if item.def.starts_with("Chunk") {
++                // Stone and slag chunks lie on the ground, as big as RimWorld draws them (M13).
++                (0.0, CHUNK_SIZE, true)
+             } else {
+-                (0.0, ITEM_SIZE)
++                (0.0, ITEM_SIZE, false)
+             };
+-            (cards.eye.is_none() || distance <= ITEM_REACH).then_some((distance, at, tex, bounds, lift, most))
++            (cards.eye.is_none() || distance <= ITEM_REACH).then_some((distance, at, tex, bounds, lift, most, flat))
+         })
+         .collect();
+     near.sort_by(|a, b| a.0.total_cmp(&b.0));
+-    for (_, at, tex, bounds, lift, most) in near.into_iter().take(MAX_ITEMS) {
++    for (_, at, tex, bounds, lift, most, flat) in near.into_iter().take(MAX_ITEMS) {
+         let (w, h) = (bounds[2] - bounds[0], bounds[3] - bounds[1]);
+         let scale = most / w.max(h).max(1e-3);
+-        add_card(vertices, indices, [at.x, at.z], cards.eye, tex, bounds, [w * scale, h * scale], false, false, lift, WHITE);
++        add_card(vertices, indices, [at.x, at.z], cards.eye, tex, bounds, [w * scale, h * scale], false, flat, lift, WHITE);
+     }
+ }
+ 
+@@ -2655,8 +2766,8 @@ fn rimworld_pictures() -> (bool, bool) {
+ /// that a seedling is.
+ fn plant_cells(kind: &str) -> f32 {
+     match kind {
+-        "pine" | "oak" | "birch" | "palm" => 2.6,
+-        "dead" => 2.2,
++        "pine" | "oak" | "birch" | "palm" => 3.4,
++        "dead" => 2.9,
+         "cactus" => 1.2,
+         "grass" => 0.8,
+         _ => 1.1,
+@@ -2665,7 +2776,9 @@ fn plant_cells(kind: &str) -> f32 {
+ const PLANT_LEAST: f32 = 0.35;
+ /// Cells of grass a side between one grass picture and the next, and how far grass is drawn.
+ const GRASS_STEP: i32 = 2;
+-const GRASS_REACH: f32 = 60.0;
++const GRASS_REACH: f32 = 40.0;
++/// How far from the eye trees and bushes are drawn, in blocks.
++const PLANT_PICTURE_REACH: f32 = 160.0;
+ 
+ /// Which of a kind's RimWorld pictures stands on cell `(x, z)`.
+ fn plant_picture(art: &HashMap<String, Vec<i32>>, kind: &str, x: i32, z: i32) -> Option<u16> {
+@@ -2687,7 +2800,19 @@ fn add_plants(vertices: &mut Vec<Vertex>, indices: &mut Vec<u32>, cards: &Cards,
+         let at = rimworld_block(size, x, 0.0, z);
+         add_card(vertices, indices, [at.x, at.z], cards.eye, tex, bounds, [w * scale, h * scale], false, false, 0.0, WHITE);
+     };
++    // Only the plants near enough to see: a whole map of them, rebuilt every frame, was much
++    // of the lag (M13).
++    let near = |x: i32, z: i32| {
++        cards.eye.is_none_or(|eye| {
++            let at = rimworld_block(size, x as f32 + 0.5, 0.0, z as f32 + 0.5);
++            let (dx, dz) = (f64::from(at.x) - eye[0], f64::from(at.z) - eye[2]);
++            dx * dx + dz * dz <= f64::from(PLANT_PICTURE_REACH * PLANT_PICTURE_REACH)
++        })
++    };
+     for plant in cards.plants {
++        if !near(plant.x, plant.z) {
++            continue;
++        }
+         let Some(tex) = plant_picture(art, &plant.kind, plant.x, plant.z) else { continue };
+         let grown = PLANT_LEAST + (1.0 - PLANT_LEAST) * plant.growth.clamp(0.0, 1.0);
+         stand(plant.x as f32 + 0.5, plant.z as f32 + 0.5, tex, plant_cells(&plant.kind) * grown);
+@@ -2697,8 +2822,10 @@ fn add_plants(vertices: &mut Vec<Vertex>, indices: &mut Vec<u32>, cards: &Cards,
+     let here = |p: f64| (p / f64::from(CELL)) as i32;
+     let (ex, ez) = (here(eye[0]), size - here(eye[2]));
+     let reach = GRASS_REACH as i32;
+-    for z in (ez - reach..=ez + reach).step_by(GRASS_STEP as usize) {
+-        for x in (ex - reach..=ex + reach).step_by(GRASS_STEP as usize) {
++    // On a grid fixed to the map, not to the eye (M13: grass stepped about as you walked).
++    let start = |v: i32| (v - reach).div_euclid(GRASS_STEP) * GRASS_STEP;
++    for z in (start(ez)..=ez + reach).step_by(GRASS_STEP as usize) {
++        for x in (start(ex)..=ex + reach).step_by(GRASS_STEP as usize) {
+             if lay.code(x * CELL, (size - 1 - z) * CELL) != Some(terrain::GRASS) {
+                 continue;
+             }
+@@ -2710,8 +2837,8 @@ fn add_plants(vertices: &mut Vec<Vertex>, indices: &mut Vec<u32>, cards: &Cards,
+ }
+ 
+ /// Each swinging door's two leaves, slid as far into the walls beside it as RimWorld has
+-/// swung them (M11). A door still in the way is its own blocks, so only one that has swung
+-/// clear is drawn: its leaves are seen finishing their slide.
++/// swung them (M11). A shut door is its leaves meeting in the middle: its blocks under the
++/// lintel only hold the player back.
+ fn add_doors(vertices: &mut Vec<Vertex>, indices: &mut Vec<u32>, cards: &Cards, size: i32) {
+     let Some(lay) = cards.lay else { return };
+     let (Some(doors), Some(detail)) = (lay.doors, lay.detail) else { return };
+@@ -2719,9 +2846,6 @@ fn add_doors(vertices: &mut Vec<Vertex>, indices: &mut Vec<u32>, cards: &Cards,
+     let top = DOOR_GAP as f32;
+     for (x, z) in doors.cells() {
+         let (Some(door), Some(swing)) = (doors.at(x, z), doors.swing(x, z)) else { continue };
+-        if swing < DOOR_OPEN {
+-            continue;
+-        }
+         let (bx, bz) = (x * CELL, (size - 1 - z) * CELL);
+         let Some(tex) = detail.wall(bx, bz) else { continue };
+         // How far each leaf has slid out of the doorway.
+@@ -2741,9 +2865,11 @@ fn add_doors(vertices: &mut Vec<Vertex>, indices: &mut Vec<u32>, cards: &Cards,
+ /// One of a door's leaves: an upright piece of its own picture from `from` to `to` (block
+ /// space) and `top` blocks high, seen from either side.
+ fn leaf(vertices: &mut Vec<Vertex>, indices: &mut Vec<u32>, tex: u16, from: [f32; 2], to: [f32; 2], top: f32) {
+-    // Bottom left, bottom right, top right, top left, and the picture there.
++    // Bottom left, bottom right, top right, top left, and the picture there. RimWorld draws a
++    // door from above, a leaf across the middle of its picture with nothing above or below,
++    // so only the middle band is stretched up the leaf.
+     let corners = [(from, 0.0), (to, 0.0), (to, top), (from, top)];
+-    let pictured = [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]];
++    let pictured = [[0.0, 0.55], [1.0, 0.55], [1.0, 0.45], [0.0, 0.45]];
+     let base = vertices.len() as u32;
+     for (([x, z], y), uv) in corners.into_iter().zip(pictured) {
+         vertices.push(Vertex {
+@@ -3747,6 +3873,25 @@ mod tests {
+         assert!(swung_chunks(&creaking, Some(&shut)).is_empty(), "a door that moved but is still shut changes no blocks");
+     }
+ 
++    #[test]
++    fn a_shut_door_holds_the_player_back_but_is_drawn_as_leaves() {
++        let door = Cell::Column(terrain::DOOR);
++        assert!(leaf_block(door, 0) && leaf_block(door, DOOR_GAP - 1), "under the lintel: leaves");
++        assert!(!leaf_block(door, DOOR_GAP), "the lintel is blocks");
++        assert_eq!(shape(door), SHAPE_FULL, "but it still holds the player back");
++        let mut mesh = SectionMesh::default();
++        let lay = Lay { size: 1, terrain: None, detail: None, doors: None };
++        add_block(&mut mesh, lay, [0, 0, 0], door, false);
++        assert!(mesh.vertices.is_empty(), "no faces under the lintel");
++    }
++
++    #[test]
++    fn rimworld_pawns_walk_through_cover_so_the_player_does_too() {
++        assert_eq!(shape(Cell::Column(terrain::COVER)), 0);
++        assert_eq!(shape(Cell::Column(terrain::MACHINE)), SHAPE_FULL);
++        assert_eq!(shape(Cell::Column(terrain::WALL)), SHAPE_FULL);
++    }
++
+     #[test]
+     fn minecraft_textures_are_used_when_there() {
+         let dir = std::env::temp_dir().join(format!("rwmw2-textures-{}", std::process::id()));
+diff --git a/crates/rimworld_world/src/rimview.rs b/crates/rimworld_world/src/rimview.rs
+index 651de41..98994c0 100644
+--- a/crates/rimworld_world/src/rimview.rs
++++ b/crates/rimworld_world/src/rimview.rs
+@@ -266,6 +266,12 @@ fn one_window_on() -> bool {
+     })
+ }
+ 
++/// Whether MW2 fills the screen when a colonist is controlled: on unless
++/// `RWMW2_FULLSCREEN=0`.
++fn fullscreen_on() -> bool {
++    !matches!(std::env::var("RWMW2_FULLSCREEN").map(|v| v.trim().to_lowercase()).as_deref(), Ok("0" | "off" | "false"))
++}
++
+ /// M12, one application: the game is played in RimWorld, and MW2's window only shows while
+ /// RimWorld's "Control in MW2" hands it a colonist; letting the colonist go hides it again.
+ /// RimWorld is told our window in our `hello`, or as soon as we find it.
+@@ -274,6 +280,7 @@ pub(crate) fn one_window(
+     time: Res<Time>,
+     link: Option<Res<RimworldLink>>,
+     outbox: Option<Res<RimworldOutbox>>,
++    mut windows: Query<&mut Window, With<bevy::window::PrimaryWindow>>,
+     mut state: Local<OneWindow>,
+ ) {
+     use std::sync::atomic::Ordering;
+@@ -308,6 +315,14 @@ pub(crate) fn one_window(
+     if hide != state.hidden {
+         state.hidden = hide;
+         window::show(window, !hide);
++        // Controlling a colonist fills the screen (M13), unless `RWMW2_FULLSCREEN=0`.
++        if !hide
++            && fullscreen_on()
++            && let Ok(mut window) = windows.single_mut()
++            && matches!(window.mode, bevy::window::WindowMode::Windowed)
++        {
++            window.mode = bevy::window::WindowMode::BorderlessFullscreen(bevy::window::MonitorSelection::Current);
++        }
+         println!("[rimworld] {}", if hide { "MW2 hides until a colonist is controlled in RimWorld" } else { "MW2 is back: controlling a colonist" });
+     }
+ }

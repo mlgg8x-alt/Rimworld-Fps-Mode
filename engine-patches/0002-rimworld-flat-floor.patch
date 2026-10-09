@@ -1,0 +1,677 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index cb8fb81..452ac06 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -24,6 +24,7 @@ members = [
+     "crates/audio",
+     "crates/bots",
+     "crates/rimworld_bridge",
++    "crates/rimworld_world",
+     "crates/clipmap_iw4",
+     "crates/console",
+     "crates/d3d9_decl",
+@@ -126,6 +127,7 @@ assets = { path = "crates/assets" }
+ audio = { path = "crates/audio" }
+ bots = { path = "crates/bots" }
+ rimworld_bridge = { path = "crates/rimworld_bridge" }
++rimworld_world = { path = "crates/rimworld_world" }
+ clipmap_iw4 = { path = "crates/clipmap_iw4" }
+ console = { path = "crates/console" }
+ d3d9_decl = { path = "crates/d3d9_decl" }
+diff --git a/crates/assets/src/minecraft_map.rs b/crates/assets/src/minecraft_map.rs
+index bda29d2..d5b2e15 100644
+--- a/crates/assets/src/minecraft_map.rs
++++ b/crates/assets/src/minecraft_map.rs
+@@ -8,6 +8,21 @@ const PROXY_ZONE: &str = "iw4:mp_rust";
+ /// The map whose level script the Minecraft world runs.
+ pub const PROXY_MAP: &str = "mp_rust";
+ 
++/// RimWorld x MW2: a flat floor generated in code, played on the same
++/// stand-in map. Needs no Minecraft files.
++pub const FLAT_ZONE: &str = "rimworld:flat";
++
++pub fn is_flat(zone: &str) -> bool {
++    zone.eq_ignore_ascii_case(FLAT_ZONE)
++}
++
++/// Whether a load's zone is a block world standing in for the proxy map:
++/// the Minecraft map or the flat floor.
++pub fn is_block_world_load(zone: &str) -> bool {
++    let bare = |z: &str| is_minecraft(z) || is_flat(z);
++    bare(zone) || zone.split_once(':').is_some_and(|(_, rest)| bare(rest))
++}
++
+ pub fn is_minecraft(zone: &str) -> bool {
+     zone.eq_ignore_ascii_case(ZONE)
+ }
+@@ -37,9 +52,15 @@ pub fn prepare() {
+ }
+ 
+ pub fn find_zone_file(root_dir: &GamesRoot, zone: &str) -> Result<ZoneFile, String> {
+-    if !is_minecraft_load(zone) {
++    if !is_block_world_load(zone) {
+         return asset_transport::find_zone_file(root_dir, zone);
+     }
++    if !is_minecraft_load(zone) {
++        let mut proxy = asset_transport::find_zone_file(root_dir, PROXY_ZONE)?;
++        proxy.zone_name = FLAT_ZONE.to_owned();
++        proxy.alias_note = Some("RimWorld x MW2 flat floor".to_owned());
++        return Ok(proxy);
++    }
+     let checkout = match root() {
+         Some(root) => root,
+         None => {
+@@ -68,6 +89,10 @@ pub fn list_mp_map_packs(root_dir: &GamesRoot) -> Vec<asset_transport::MapPack>
+             label: "Minecraft".to_owned(),
+             maps: vec![ZONE.to_owned()],
+         });
++        packs.push(asset_transport::MapPack {
++            label: "RimWorld".to_owned(),
++            maps: vec![FLAT_ZONE.to_owned()],
++        });
+     }
+     packs
+ }
+@@ -78,6 +103,7 @@ pub fn list_mp_maps(root_dir: &GamesRoot) -> Vec<String> {
+     prepare();
+     if asset_transport::find_zone_file(root_dir, PROXY_ZONE).is_ok() {
+         maps.push(ZONE.to_owned());
++        maps.push(FLAT_ZONE.to_owned());
+     }
+     maps.sort();
+     maps.dedup();
+diff --git a/crates/audio/src/ambient.rs b/crates/audio/src/ambient.rs
+index c9fd8e6..584734b 100644
+--- a/crates/audio/src/ambient.rs
++++ b/crates/audio/src/ambient.rs
+@@ -439,7 +439,7 @@ pub(crate) fn boot_map_ambient_once(
+         return;
+     }
+     // A Minecraft world has no ambience of the map it stands in for.
+-    if assets::minecraft_map::is_minecraft_load(&identity.zone) {
++    if assets::minecraft_map::is_block_world_load(&identity.zone) {
+         booted.0 = true;
+         return;
+     }
+diff --git a/crates/audio/src/script_ambient.rs b/crates/audio/src/script_ambient.rs
+index 5165272..47c42e7 100644
+--- a/crates/audio/src/script_ambient.rs
++++ b/crates/audio/src/script_ambient.rs
+@@ -85,7 +85,7 @@ pub(crate) fn update_script_ambient(
+         }
+     }
+     // A Minecraft world has no ambience of the map it stands in for.
+-    if identity.is_some_and(|identity| assets::minecraft_map::is_minecraft_load(&identity.zone)) {
++    if identity.is_some_and(|identity| assets::minecraft_map::is_block_world_load(&identity.zone)) {
+         for (entity, _, _, _) in &voices {
+             commands.entity(entity).try_despawn();
+         }
+diff --git a/crates/bootstrap/Cargo.toml b/crates/bootstrap/Cargo.toml
+index 3106d84..63ae889 100644
+--- a/crates/bootstrap/Cargo.toml
++++ b/crates/bootstrap/Cargo.toml
+@@ -42,6 +42,7 @@ session.workspace = true
+ bots = { path = "../bots" }
+ hud = { path = "../hud" }
+ rimworld_bridge.workspace = true
++rimworld_world.workspace = true
+ perf.workspace = true
+ sha2.workspace = true
+ serde_json.workspace = true
+diff --git a/crates/bootstrap/src/plugins.rs b/crates/bootstrap/src/plugins.rs
+index 5221846..5bf59cf 100644
+--- a/crates/bootstrap/src/plugins.rs
++++ b/crates/bootstrap/src/plugins.rs
+@@ -43,6 +43,8 @@ pub fn add_runtime_plugins_with_role(app: &mut App, role: RuntimeRole) {
+         .add_plugins(ReplayPlugin)
+         .add_plugins(RenderPlugin)
+         .add_plugins(SessionPlugin);
++    // RimWorld x MW2: the rimworld:flat map.
++    app.add_plugins(rimworld_world::RimworldWorldPlugin);
+     // RimWorld x MW2: the host side listens for the RimWorld mod.
+     if matches!(role, RuntimeRole::Listen | RuntimeRole::Dedicated) {
+         app.add_plugins(rimworld_bridge::RimworldBridgePlugin);
+diff --git a/crates/minecraft_terrain/src/mesh.rs b/crates/minecraft_terrain/src/mesh.rs
+index 69e54cb..77ac6e3 100644
+--- a/crates/minecraft_terrain/src/mesh.rs
++++ b/crates/minecraft_terrain/src/mesh.rs
+@@ -156,6 +156,18 @@ impl AnimatedTile {
+     }
+ }
+ impl Atlas {
++    /// An atlas of images made in code, with no named regions.
++    pub fn from_pixels(pixels: RgbaImage, mipmaps: Vec<RgbaImage>) -> Self {
++        Self {
++            pixels,
++            mipmaps,
++            slots: HashMap::new(),
++            missing: Vec::new(),
++            animated: Vec::new(),
++            animated_tiles: Vec::new(),
++        }
++    }
++
+     pub fn region(&self, id: &ResourceId) -> [f32; 4] {
+         self.slots
+             .get(id)
+diff --git a/crates/render_anim/src/minecraft_world.rs b/crates/render_anim/src/minecraft_world.rs
+index 9ec094f..1c24cfe 100644
+--- a/crates/render_anim/src/minecraft_world.rs
++++ b/crates/render_anim/src/minecraft_world.rs
+@@ -26,6 +26,11 @@ pub const LIGHT_VOLUME: i32 = 64;
+ /// Chunk sections fade in over this long, as the viewer's default option.
+ const FADE_MILLIS: u64 = 750;
+ 
++/// The system that runs the Minecraft world each frame, for others to order
++/// against.
++#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
++pub struct MinecraftWorldUpdate;
++
+ /// What the renderer takes from the world each frame.
+ #[derive(Resource, Default)]
+ pub struct MinecraftWorldView {
+@@ -210,7 +215,8 @@ pub(crate) fn register(app: &mut App) {
+             Update,
+             update
+                 .after(frame::PresentedPublished)
+-                .in_set(frame::ClientSet::Present),
++                .in_set(frame::ClientSet::Present)
++                .in_set(MinecraftWorldUpdate),
+         );
+ }
+ 
+diff --git a/crates/render_frontend/src/prepare/scene/spawn.rs b/crates/render_frontend/src/prepare/scene/spawn.rs
+index dd98b10..33aa0eb 100644
+--- a/crates/render_frontend/src/prepare/scene/spawn.rs
++++ b/crates/render_frontend/src/prepare/scene/spawn.rs
+@@ -301,7 +301,7 @@ pub(crate) fn spawn_world(
+     if job.phase == WorldSpawnPhase::Programs && !job.compile.armed {
+         if load
+             .as_deref()
+-            .is_some_and(|load| assets::minecraft_map::is_minecraft_load(&load.zone))
++            .is_some_and(|load| assets::minecraft_map::is_block_world_load(&load.zone))
+         {
+             neutral_reflection_probes(&mut scene.reflection_probes);
+         }
+diff --git a/crates/rimworld_world/Cargo.toml b/crates/rimworld_world/Cargo.toml
+new file mode 100644
+index 0000000..511b888
+--- /dev/null
++++ b/crates/rimworld_world/Cargo.toml
+@@ -0,0 +1,20 @@
++[package]
++name = "rimworld_world"
++version = "0.1.0"
++edition.workspace = true
++license.workspace = true
++description = "RimWorld x MW2: the rimworld:flat map, a flat floor of RimWorld-sized cells drawn and collided as blocks."
++
++[dependencies]
++assets.workspace = true
++bevy.workspace = true
++diag.workspace = true
++frame.workspace = true
++net.workspace = true
++render_anim.workspace = true
++sim.workspace = true
++minecraft_terrain = { path = "../minecraft_terrain" }
++image = { version = "0.25", default-features = false, features = ["png"] }
++
++[lints]
++workspace = true
+diff --git a/crates/rimworld_world/src/lib.rs b/crates/rimworld_world/src/lib.rs
+new file mode 100644
+index 0000000..4e57511
+--- /dev/null
++++ b/crates/rimworld_world/src/lib.rs
+@@ -0,0 +1,428 @@
++//! RimWorld x MW2: the `rimworld:flat` map. A flat floor with one block per
++//! RimWorld cell (250 by 250 cells, RimWorld's default map size) and a low
++//! wall around it, drawn and collided through the Minecraft world's block
++//! renderer and `sim::voxel`, on the same stand-in IW4 map. Everything is
++//! made in code: it needs no Minecraft files.
++//!
++//! Map origin is the middle of the floor and the floor's top is at height 0.
++//! RimWorld cell `(x, z)` is block `(x, -1, z)`, its top face at block height 0.
++use std::sync::Arc;
++
++use bevy::prelude::*;
++use bevy::window::PrimaryWindow;
++use image::{Rgba, RgbaImage};
++use minecraft_terrain::mesh::{Atlas, SectionMesh, SectionVertex};
++use render_anim::minecraft_world::MinecraftWorldView;
++use sim::voxel::{BLOCK, VoxelChunk};
++
++/// Cells on a side, unless `RWMW2_FLAT_SIZE` says otherwise.
++const DEFAULT_SIZE: i32 = 250;
++/// Blocks of wall above the floor: higher than the 39-unit jump.
++const WALL_HEIGHT: i32 = 2;
++/// Players this far below the floor are put back on it.
++const FALLEN: f32 = -3.0 * BLOCK;
++const MAX_CLIENTS: u32 = 18;
++/// Atlas tiles, 16 pixels square, side by side.
++const TILE: u32 = 16;
++const TILES: u32 = 8;
++const TILE_CELL: u32 = 0;
++// 1, 2, 3: a cell with a strong line on its west, north, or both edges.
++const TILE_CENTRE: u32 = 4;
++const TILE_WALL: u32 = 5;
++/// A cell grid line every this many cells, as RimWorld's own grid overlay.
++const MAJOR_LINE: i32 = 10;
++const FULL_BRIGHT: [u8; 2] = [15 * 16, 0];
++
++pub struct RimworldWorldPlugin;
++
++impl Plugin for RimworldWorldPlugin {
++    fn build(&self, app: &mut App) {
++        app.init_resource::<FlatFloor>().add_systems(
++            Update,
++            update
++                // Before the Minecraft world, which leaves a view it did
++                // not turn on alone.
++                .before(render_anim::minecraft_world::MinecraftWorldUpdate)
++                .after(frame::PresentedPublished)
++                .in_set(frame::ClientSet::Present),
++        );
++    }
++}
++
++/// The flat floor while it is loaded.
++#[derive(Resource, Default)]
++pub struct FlatFloor {
++    /// The floor's map is installed and its blocks are up.
++    pub active: bool,
++    /// Installed, waiting for the authority to put its blocks on.
++    pending: bool,
++    /// Cells on a side.
++    pub size: i32,
++    /// The block point at map origin.
++    pub origin: [f64; 3],
++    alive: [bool; MAX_CLIENTS as usize],
++}
++
++impl FlatFloor {
++    /// RimWorld cell `(x, z)` to the map point on its floor, in its middle.
++    pub fn cell_to_map(&self, x: f32, z: f32) -> [f32; 3] {
++        sim::voxel::to_map(self.origin, [f64::from(x) + 0.5, 0.0, f64::from(z) + 0.5])
++    }
++}
++
++fn size() -> i32 {
++    std::env::var("RWMW2_FLAT_SIZE")
++        .ok()
++        .and_then(|s| s.trim().parse().ok())
++        .unwrap_or(DEFAULT_SIZE)
++        .clamp(16, 1024)
++}
++
++#[allow(clippy::too_many_arguments)]
++fn update(
++    mut installed: MessageReader<frame::MatchInstalled>,
++    mut torn_down: MessageReader<frame::MatchTornDown>,
++    view: Option<ResMut<MinecraftWorldView>>,
++    authority: Option<ResMut<net::AuthorityWorld>>,
++    local: Res<net::LocalPresentClient>,
++    presented: Res<net::PresentedSnapshot>,
++    windows: Query<&Window, With<PrimaryWindow>>,
++    mut floor: ResMut<FlatFloor>,
++) {
++    let Some(mut view) = view else {
++        return;
++    };
++    // Put up last frame's install first, so the authority holds its map.
++    if floor.pending
++        && let Some(authority) = authority.as_deref()
++    {
++        floor.pending = false;
++        floor.active = true;
++        floor.size = size();
++        floor.origin = [f64::from(floor.size) / 2.0, 0.0, f64::from(floor.size) / 2.0];
++        floor.alive = Default::default();
++        build(&floor, authority, &mut view);
++        diag::info!(World, "RimWorld flat floor: {0} by {0} cells", floor.size);
++        println!("[rimworld] flat floor ready: {0} by {0} cells", floor.size);
++    }
++    for _ in torn_down.read() {
++        stop(&mut floor, &mut view);
++    }
++    for match_ in installed.read() {
++        stop(&mut floor, &mut view);
++        if assets::minecraft_map::is_flat(&match_.zone) {
++            floor.pending = true;
++        }
++    }
++    if !floor.active {
++        return;
++    }
++
++    if let Some(mut authority) = authority {
++        place_players(&mut floor, &mut authority);
++    }
++
++    let Some(ps) = presented.player(local.0) else {
++        return;
++    };
++    let eye = sim::voxel::to_block(
++        floor.origin,
++        [ps.origin[0], ps.origin[1], ps.origin[2] + ps.view_height_current],
++    );
++    let (pitch, yaw) = (ps.viewangles[0].to_radians(), ps.viewangles[1].to_radians());
++    let map_forward = [pitch.cos() * yaw.cos(), pitch.cos() * yaw.sin(), -pitch.sin()];
++    let forward = Vec3::new(map_forward[0], map_forward[2], -map_forward[1]);
++    let aspect = windows
++        .single()
++        .map(|w| w.width() / w.height().max(1.0))
++        .unwrap_or(16.0 / 9.0);
++    view.environment = environment(eye, forward, aspect, floor.size as f32);
++    view.eye_light = [15.0, 0.0];
++}
++
++/// Spawns land on the floor, spread around its middle, and anyone who falls
++/// off is put back.
++fn place_players(floor: &mut FlatFloor, authority: &mut net::AuthorityWorld) {
++    for index in 0..MAX_CLIENTS {
++        let id = sim::ClientId(index);
++        let Some(ps) = authority.0.player(id) else {
++            floor.alive[index as usize] = false;
++            continue;
++        };
++        let alive = ps.pm_type == 0;
++        let spawned = alive && !floor.alive[index as usize];
++        let fallen = alive && ps.origin[2] < FALLEN;
++        if (spawned || fallen) && authority.0.teleport(id, spawn_point(index)) {
++            floor.alive[index as usize] = true;
++        } else if !alive {
++            floor.alive[index as usize] = false;
++        }
++    }
++}
++
++/// Client 0 at the middle, others on a ring four cells out.
++fn spawn_point(index: u32) -> [f32; 3] {
++    if index == 0 {
++        return [0.0, 0.0, 1.0];
++    }
++    let angle = index as f32 / (MAX_CLIENTS - 1) as f32 * std::f32::consts::TAU;
++    let radius = 4.0 * BLOCK;
++    [angle.cos() * radius, angle.sin() * radius, 1.0]
++}
++
++fn stop(floor: &mut FlatFloor, view: &mut MinecraftWorldView) {
++    floor.pending = false;
++    if !floor.active {
++        return;
++    }
++    floor.active = false;
++    sim::voxel::deactivate();
++    view.active = false;
++    view.atlas = None;
++    view.celestial = None;
++    view.crack_texture = None;
++    view.uploads.clear();
++    view.visible.clear();
++    view.generation += 1;
++}
++
++/// What a block of the floor's world is.
++#[derive(Clone, Copy, PartialEq, Eq)]
++enum Cell {
++    Air,
++    Floor,
++    Wall,
++}
++
++fn cell_at(size: i32, x: i32, y: i32, z: i32) -> Cell {
++    let inside = |v: i32| (0..size).contains(&v);
++    let around = |v: i32| (-1..=size).contains(&v);
++    let on_wall = around(x) && around(z) && !(inside(x) && inside(z));
++    match y {
++        -1 if inside(x) && inside(z) => Cell::Floor,
++        y if on_wall && (-1..WALL_HEIGHT).contains(&y) => Cell::Wall,
++        _ => Cell::Air,
++    }
++}
++
++/// Puts up the floor's collision and meshes.
++fn build(floor: &FlatFloor, authority: &net::AuthorityWorld, view: &mut MinecraftWorldView) {
++    let size = floor.size;
++    let full = vec![[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]];
++    sim::voxel::activate(authority.0.content().clip_brushes(), floor.origin, vec![Vec::new(), full]);
++    view.active = true;
++    view.origin = floor.origin;
++    view.generation += 1;
++    view.atlas = Some(Arc::new(atlas()));
++    view.celestial = Some(Arc::new(celestial()));
++    view.crack_texture = Some(Arc::new(RgbaImage::new(TILE * 10, TILE)));
++    view.light_volume = None;
++    view.clouds = None;
++    view.uploads.clear();
++    view.removed.clear();
++    view.visible.clear();
++
++    let (min_y, height) = (-1, WALL_HEIGHT + 1);
++    let chunks = (-1 >> 4)..=(size >> 4);
++    for cz in chunks.clone() {
++        for cx in chunks.clone() {
++            let mut shapes = vec![0u16; (height * 256) as usize];
++            let mut mesh = SectionMesh::default();
++            for z in 0..16 {
++                for x in 0..16 {
++                    let (bx, bz) = (cx * 16 + x, cz * 16 + z);
++                    for y in min_y..min_y + height {
++                        let cell = cell_at(size, bx, y, bz);
++                        if cell == Cell::Air {
++                            continue;
++                        }
++                        shapes[(((y - min_y) * 16 + z) * 16 + x) as usize] = 1;
++                        add_block(&mut mesh, size, [bx, y, bz], cell);
++                    }
++                }
++            }
++            sim::voxel::set_chunk(cx, cz, VoxelChunk { min_y, height, shapes });
++            if !mesh.indices.is_empty() {
++                let pos = (cx, 0, cz);
++                view.uploads.push((pos, mesh));
++                view.visible.push((pos, 0.0));
++            }
++        }
++    }
++}
++
++/// The faces of one block that are not against another solid block.
++fn add_block(mesh: &mut SectionMesh, size: i32, [x, y, z]: [i32; 3], cell: Cell) {
++    let solid = |dx: i32, dy: i32, dz: i32| cell_at(size, x + dx, y + dy, z + dz) != Cell::Air;
++    let tile = match cell {
++        Cell::Wall => TILE_WALL,
++        _ if x == size / 2 && z == size / 2 => TILE_CENTRE,
++        _ => {
++            let major = |v: i32| (v - size / 2).rem_euclid(MAJOR_LINE) == 0;
++            TILE_CELL + u32::from(major(x)) + 2 * u32::from(major(z))
++        }
++    };
++    let (x0, y0, z0) = (x as f32, y as f32, z as f32);
++    let (x1, y1, z1) = (x0 + 1.0, y0 + 1.0, z0 + 1.0);
++    // Corners counterclockwise seen from outside; Minecraft's face shades.
++    let faces: [([i32; 3], [[f32; 3]; 4], f32); 6] = [
++        ([0, 1, 0], [[x0, y1, z0], [x0, y1, z1], [x1, y1, z1], [x1, y1, z0]], 1.0),
++        ([0, -1, 0], [[x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1]], 0.5),
++        ([0, 0, -1], [[x1, y0, z0], [x0, y0, z0], [x0, y1, z0], [x1, y1, z0]], 0.8),
++        ([0, 0, 1], [[x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]], 0.8),
++        ([-1, 0, 0], [[x0, y0, z0], [x0, y0, z1], [x0, y1, z1], [x0, y1, z0]], 0.6),
++        ([1, 0, 0], [[x1, y0, z1], [x1, y0, z0], [x1, y1, z0], [x1, y1, z1]], 0.6),
++    ];
++    let (u0, u1) = ((tile * TILE) as f32 / (TILE * TILES) as f32, ((tile + 1) * TILE) as f32 / (TILE * TILES) as f32);
++    for ([dx, dy, dz], corners, shade) in faces {
++        // Nothing is ever under the floor to see its bottom.
++        if dy == -1 || solid(dx, dy, dz) {
++            continue;
++        }
++        let base = mesh.vertices.len() as u32;
++        // The top face's u runs east and v south, so a cell's west and north
++        // edges are the tile's left and top.
++        let uvs = if dy == 1 {
++            [[u0, 0.0], [u0, 1.0], [u1, 1.0], [u1, 0.0]]
++        } else {
++            [[u0, 1.0], [u1, 1.0], [u1, 0.0], [u0, 0.0]]
++        };
++        let grey = (shade * 255.0) as u8;
++        for (position, uv) in corners.into_iter().zip(uvs) {
++            mesh.vertices.push(SectionVertex {
++                position,
++                uv,
++                color: [grey, grey, grey, 255],
++                light: FULL_BRIGHT,
++                pad: [0; 2],
++            });
++        }
++        mesh.indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
++    }
++}
++
++/// The floor's tiles, and their mip levels down to a pixel a tile.
++fn atlas() -> Atlas {
++    let mut pixels = RgbaImage::new(TILE * TILES, TILE);
++    let base = [182, 172, 150];
++    let fine = [158, 149, 130];
++    let major = [118, 110, 96];
++    let tile = |pixels: &mut RgbaImage, index: u32, paint: &dyn Fn(u32, u32) -> [u8; 3]| {
++        for y in 0..TILE {
++            for x in 0..TILE {
++                let [r, g, b] = paint(x, y);
++                pixels.put_pixel(index * TILE + x, y, Rgba([r, g, b, 255]));
++            }
++        }
++    };
++    for index in 0..4 {
++        let (west, north) = (index & 1 != 0, index & 2 != 0);
++        tile(&mut pixels, TILE_CELL + index, &|x, y| match (x, y) {
++            (0, _) if west => major,
++            (_, 0) if north => major,
++            (0, _) | (_, 0) => fine,
++            _ => base,
++        });
++    }
++    tile(&mut pixels, TILE_CENTRE, &|x, y| {
++        if x == 0 || y == 0 { [150, 80, 30] } else { [224, 122, 40] }
++    });
++    tile(&mut pixels, TILE_WALL, &|x, y| {
++        if x == 0 || y == 0 || x == TILE - 1 || y == TILE - 1 { [78, 82, 90] } else { [104, 110, 120] }
++    });
++    let mut mipmaps: Vec<RgbaImage> = Vec::new();
++    while mipmaps.last().unwrap_or(&pixels).height() > 1 {
++        let from = mipmaps.last().unwrap_or(&pixels);
++        let (w, h) = (from.width() / 2, from.height() / 2);
++        let next = RgbaImage::from_fn(w, h, |x, y| {
++            let mut sum = [0u32; 4];
++            for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
++                let p = from.get_pixel(x * 2 + dx, y * 2 + dy);
++                for c in 0..4 {
++                    sum[c] += u32::from(p[c]);
++                }
++            }
++            Rgba(sum.map(|s| (s / 4) as u8))
++        });
++        mipmaps.push(next);
++    }
++    Atlas::from_pixels(pixels, mipmaps)
++}
++
++/// The sun in the first of the nine sun and moon slots; no moon.
++fn celestial() -> RgbaImage {
++    RgbaImage::from_fn(32 * 9, 32, |x, y| {
++        if x < 32 && (8..24).contains(&x) && (8..24).contains(&y) {
++            Rgba([255, 250, 220, 255])
++        } else {
++            Rgba([0, 0, 0, 0])
++        }
++    })
++}
++
++/// MinecraftOSS's environment uniform for a clear, still noon, laid out as
++/// the Minecraft world's update lays it out.
++fn environment(eye: [f64; 3], forward: Vec3, aspect: f32, size: f32) -> [[f32; 4]; 16] {
++    let right = forward.cross(Vec3::Y).normalize_or(Vec3::X);
++    let up = right.cross(forward).normalize_or(Vec3::Y);
++    let put = |v: Vec3| [v.x, v.y, v.z, 0.0];
++    // Fog only past the far side of the floor seen from its edge.
++    let fog_end = size * 1.6;
++    let sun = Vec3::new(0.3, 1.0, 0.2).normalize();
++    [
++        put(forward),
++        put(right),
++        put(up),
++        [eye[0] as f32, eye[1] as f32, eye[2] as f32, 0.0],
++        [0.47, 0.65, 1.0, 0.0],
++        [0.75, 0.85, 1.0, fog_end],
++        [1.0, 1.0, 1.0, 1.0],
++        [0.0, 0.0, 0.0, 0.0],
++        [sun.x, sun.y, sun.z, 1.0],
++        [-sun.x, -sun.y, -sun.z, 0.0],
++        [1.0, 1.0, 1.0, 0.5],
++        [aspect, 0.0, 0.0, 0.0],
++        [0.0, 0.0, 96.0, 160.0],
++        [fog_end * 0.6, fog_end, fog_end * 0.9, fog_end],
++        [0.05, 0.05, 0.05, 0.0],
++        [1.0, 0.9, 0.8, 1.0],
++    ]
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn floor_and_wall_layout() {
++        assert!(cell_at(250, 0, -1, 0) == Cell::Floor);
++        assert!(cell_at(250, 249, -1, 249) == Cell::Floor);
++        assert!(cell_at(250, 125, 0, 125) == Cell::Air);
++        assert!(cell_at(250, -1, 0, 10) == Cell::Wall);
++        assert!(cell_at(250, 250, 1, 250) == Cell::Wall);
++        assert!(cell_at(250, 250, 2, 250) == Cell::Air);
++        assert!(cell_at(250, -2, -1, 0) == Cell::Air);
++    }
++
++    #[test]
++    fn a_floor_cell_shows_only_its_top() {
++        let mut mesh = SectionMesh::default();
++        add_block(&mut mesh, 250, [10, -1, 10], Cell::Floor);
++        assert_eq!(mesh.indices.len(), 6);
++        assert!(mesh.vertices[..4].iter().all(|v| v.position[1] == 0.0));
++    }
++
++    #[test]
++    fn atlas_mips_reach_one_pixel_a_tile() {
++        let atlas = atlas();
++        let last = atlas.mipmaps.last().unwrap();
++        assert_eq!((last.width(), last.height()), (TILES, 1));
++    }
++
++    #[test]
++    fn map_origin_is_the_middle_of_the_floor() {
++        let floor = FlatFloor { size: 250, origin: [125.0, 0.0, 125.0], ..Default::default() };
++        let middle = floor.cell_to_map(124.5, 124.5);
++        assert!(middle.iter().all(|v| v.abs() < 1e-3), "{middle:?}");
++    }
++}
+diff --git a/crates/session/src/match_apply.rs b/crates/session/src/match_apply.rs
+index 6840208..7ffe4f2 100644
+--- a/crates/session/src/match_apply.rs
++++ b/crates/session/src/match_apply.rs
+@@ -986,7 +986,7 @@ fn preflight_match_install(
+             .collect(),
+     };
+     // The Minecraft world runs the level script of the map it stands in for.
+-    let script_map = if assets::minecraft_map::is_minecraft_load(zone) {
++    let script_map = if assets::minecraft_map::is_block_world_load(zone) {
+         assets::minecraft_map::PROXY_MAP
+     } else {
+         zone
+@@ -1034,7 +1034,7 @@ fn preflight_match_install(
+         }
+     }
+     // A Minecraft world has no time or score limit.
+-    if assets::minecraft_map::is_minecraft_load(zone) {
++    if assets::minecraft_map::is_block_world_load(zone) {
+         for limit in ["timelimit", "scorelimit"] {
+             let name = format!("scr_{gametype}_{limit}");
+             match script_dvars.iter_mut().find(|(set, _)| set.eq_ignore_ascii_case(&name)) {
