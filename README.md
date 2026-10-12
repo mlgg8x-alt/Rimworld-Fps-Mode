@@ -1,3 +1,5 @@
+<img width="2559" height="1439" alt="rimworld_thumb" src="https://github.com/user-attachments/assets/84606393-3be5-4eb6-b93c-924e8735cd58" />
+
 # RimWorld x MW2
 
 Play RimWorld fights in first person, in Call of Duty: Modern Warfare 2 (2009).
