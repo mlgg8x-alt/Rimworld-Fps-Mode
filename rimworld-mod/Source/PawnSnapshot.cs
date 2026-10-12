@@ -129,6 +129,11 @@ namespace RimWorldMW2
             }
             string carried = Carried(pawn.carryTracker?.CarriedThing);
             if (carried != null) json.Raw("carry", carried);
+            // M23: the weapon in its hands, and its melee attacks.
+            string held = HeldReport.Held(pawn);
+            if (held != null) json.Raw("held", held);
+            int swings = HeldReport.Swings(pawn);
+            if (swings > 0) json.Num("swings", (long)swings);
             return json.Bool("downed", pawn.Downed).Str("faction", FactionOf(pawn)).ToString();
         }
 

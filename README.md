@@ -15,6 +15,8 @@ What works today:
   trees, grass, crops, furniture and items, using RimWorld's own pictures and MW2 models.
 - Every pawn is there as RimWorld's own picture of them: colonists, raiders, animals and
   mechs.
+- Drafted colonists and raiders hold their actual weapon, RimWorld's picture of it, aimed at
+  what they shoot at. Melee attackers swing their weapon and lunge.
 - You use your colonist's own gun, with RimWorld's burst, warm-up and cooldown. Your hits
   wound the body part you hit in RimWorld. RimWorld's bullets fly at you and can be dodged.
 - You can throw your colonist's grenades. Explosions, fire, smoke, gas, rain, snow, fog,

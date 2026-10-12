@@ -327,6 +327,16 @@ soldiers, or as boxes while the soldier models or a picture's texture were not r
       animal's missing side shows another side (mod)
 - [x] `RWMW2_RIMWORLD_PAWNS` is gone
 
+## M23: weapons in hand, melee swings
+Ryan, 2026-10-12: RimWorld's people should hold the weapon they actually hold when drafted,
+with some animation when they attack in melee, and raiders always.
+
+- [x] The weapon in a pawn's hands is RimWorld's own picture of it, where RimWorld draws it:
+      aimed at what the pawn aims at or attacks, carried while drafted or fighting, and
+      always for enemies; turned to the view as RimWorld turns it on its map (0041 + mod)
+- [x] Melee attacks swing the weapon from raised to struck and lunge the attacker at its
+      target, bare-handed too, as RimWorld jolts it (0041 + mod)
+
 ## Balance notes
 MW2 fire rates are far above RimWorld bursts. v0 scales per-bullet damage by
 RimWorld DPS / MW2 DPS with one tunable multiplier. Weapon map starts as: assault rifle → ACR,

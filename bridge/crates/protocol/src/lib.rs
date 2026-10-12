@@ -607,6 +607,33 @@ pub struct PawnState {
     /// What the pawn carries (M15): a person, an animal or a thing, as RimWorld draws it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub carry: Option<Carried>,
+    /// The weapon in its hands where RimWorld shows it (M23): drafted, aiming or attacking,
+    /// and always for enemies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held: Option<Held>,
+    /// How many melee attacks it has made (M23), absent until its first: IW4L swings its
+    /// weapon (or lunges, bare-handed) whenever this goes up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub swings: Option<u32>,
+}
+
+/// A weapon in a pawn's hands as RimWorld draws it (M23): its picture (`tex`, a cut-out index
+/// into `textures`, the barrel or blade pointing east as RimWorld's are) and `size` in cells;
+/// `aim`, degrees clockwise from north, where it points while the pawn aims or attacks
+/// (absent while it is only carried); RimWorld's `equippedAngleOffset` (`turn`, degrees) and
+/// how far from the body it is held (`reach`, cells); and whether it is a melee weapon.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Held {
+    pub tex: i32,
+    pub size: [f32; 2],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aim: Option<f32>,
+    #[serde(default)]
+    pub turn: f32,
+    #[serde(default)]
+    pub reach: f32,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub melee: bool,
 }
 
 /// How a gun fires in RimWorld (M15), in seconds of game time: `burst` shots `between`

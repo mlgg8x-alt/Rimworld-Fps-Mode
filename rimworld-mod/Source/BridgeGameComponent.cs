@@ -67,6 +67,7 @@ namespace RimWorldMW2
             EffectsReport.Reset();
             WeatherReport.Reset();
             FleckReport.Reset();
+            HeldReport.Reset();
             ShotReport.Send = line =>
             {
                 if (client != null && client.Connected) client.Send(line);

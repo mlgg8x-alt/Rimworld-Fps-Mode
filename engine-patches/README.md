@@ -304,4 +304,9 @@ a scratch copy that already has the earlier patches (`add -N` makes new files sh
   gone; a pawn whose picture has not arrived or loaded is not shown, and one whose new
   picture is loading keeps its old one. `RWMW2_RIMWORLD_PAWNS` is gone.
 
+- `0041-rimworld-held-weapons-melee-swings.patch` (M23): the snapshot's `held` weapon stands
+  at the pawn's hands as RimWorld's picture, pointing where it aims as seen from the eye
+  (mirrored to point left, down when towards the eye), turned by the weapon's own offset;
+  `swings` going up plays a melee swing (raised to struck) and a lunge at the target.
+
 If the engine changes grow large, switch to a real fork and point `versions.json` at it.
