@@ -47,6 +47,17 @@ namespace RimWorldFPS
             string port = Settings.Port.ToString();
             list.TextFieldNumericLabeled("Port", ref Settings.Port, ref port, 1, 65535);
             list.CheckboxLabeled("Start the FPS client in the background with RimWorld", ref Settings.LaunchClient);
+            Rect statusRow = list.GetRect(24f);
+            Color statusColor = BridgeGameComponent.Linked
+                ? new Color(0.30f, 0.85f, 0.35f)
+                : ClientLauncher.FatalError
+                    ? new Color(0.90f, 0.22f, 0.20f)
+                    : new Color(0.95f, 0.72f, 0.20f);
+            Widgets.DrawBoxSolid(new Rect(statusRow.x, statusRow.y + 5f, 12f, 12f), statusColor);
+            Widgets.Label(new Rect(statusRow.x + 20f, statusRow.y, statusRow.width - 20f, statusRow.height),
+                "FPS client: " + ClientLauncher.StatusText);
+            if (Widgets.ButtonText(list.GetRect(30f), "Force start FPS client"))
+                ClientLauncher.ForceStart();
             list.CheckboxLabeled("Connect automatically when a game loads", ref Settings.AutoConnect);
             list.CheckboxLabeled("Hide RimWorld's UI in FPS mode (off keeps it up for debugging)", ref Settings.HideUiInMinimap);
             list.End();
