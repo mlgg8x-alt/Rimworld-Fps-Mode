@@ -18,6 +18,8 @@
     <DebugType>none</DebugType>
     <Nullable>disable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- Per-version build folders (obj/1.6, obj/1.7) are not source. -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);obj/**;bin/**</DefaultItemExcludes>
   </PropertyGroup>
 
   <ItemGroup>
