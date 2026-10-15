@@ -51,8 +51,15 @@ public sealed class Pictures
         this.settings = settings;
     }
 
+    private Dictionary<int, byte[]> data = new();
+
+    /// <summary>A picture's pixels: sent over the bridge, else from the folder (the demo).</summary>
+    private (Color[] pixels, int w, int h) Read(int index) =>
+        data.TryGetValue(index, out byte[]? png) ? Img.FromPng(png) : Img.Load(Path.Combine(dir, names[index] + ".png"));
+
     public void Sync(Link link)
     {
+        data = link.TextureData;
         if (link.TexturesRev == textureRev) return;
         textureRev = link.TexturesRev;
         bool sameDir = link.TexturesDir == dir;
@@ -105,7 +112,7 @@ public sealed class Pictures
         if (index < 0 || index >= names.Count) return null;
         try
         {
-            var (pixels, w, h) = Img.Load(Path.Combine(dir, names[index] + ".png"));
+            var (pixels, w, h) = Read(index);
             int factor = Math.Max(1, Math.Max(w, h) / Math.Max(4, most));
             if (factor > 1) (pixels, w, h) = Img.Shrink(pixels, w, h, factor);
             Img.HardEdges(pixels);
@@ -141,7 +148,7 @@ public sealed class Pictures
         string name = names[index];
         try
         {
-            pics[index] = Make(name, dir);
+            pics[index] = Make(index);
             state[index] = 2;
             Revision++;
         }
@@ -152,18 +159,19 @@ public sealed class Pictures
         }
     }
 
-    private Pic Make(string name, string folder)
+    private Pic Make(int index)
     {
-        var (pixels, w, h) = Img.Load(Path.Combine(folder, name + ".png"));
+        string name = names[index];
+        var (pixels, w, h) = Read(index);
         bool floor = name.EndsWith("_floor", StringComparison.Ordinal);
         bool cutout = name.EndsWith("_cut", StringComparison.Ordinal);
         Pic? face = null;
         if (name.EndsWith("_l15", StringComparison.Ordinal))
         {
-            string side = Path.Combine(folder, name[..^4] + "_l11.png");
-            if (File.Exists(side))
+            int side = names.IndexOf(name[..^4] + "_l11");
+            if (side >= 0 && (data.ContainsKey(side) || File.Exists(Path.Combine(dir, names[side] + ".png"))))
             {
-                var (sidePixels, sw, sh) = Img.Load(side);
+                var (sidePixels, sw, sh) = Read(side);
                 Color[]? band = sw == w && sh == h ? Img.Face(pixels, sidePixels, w, h) : null;
                 if (band != null) face = Put(band, w, h, settings.PictureTexels, false);
             }
@@ -212,10 +220,16 @@ public sealed class Pictures
 /// <summary>Plain pixel work on RGBA pictures, top row first.</summary>
 public static class Img
 {
-    public static unsafe (Color[] pixels, int w, int h) Load(string path)
+    public static (Color[] pixels, int w, int h) Load(string path)
     {
         if (!File.Exists(path)) throw new FileNotFoundException("no such picture", path);
-        Image image = Raylib.LoadImage(path);
+        return From(Raylib.LoadImage(path));
+    }
+
+    public static (Color[] pixels, int w, int h) FromPng(byte[] png) => From(Raylib.LoadImageFromMemory(".png", png));
+
+    private static unsafe (Color[] pixels, int w, int h) From(Image image)
+    {
         if (image.Data == null || image.Width <= 0) throw new InvalidDataException("not a picture");
         try
         {

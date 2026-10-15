@@ -69,6 +69,7 @@ namespace RimWorldFPS
             FleckReport.Reset();
             HeldReport.Reset();
             StatusReport.Reset();
+            HealthCard.Reset();
             ShotReport.Send = line =>
             {
                 if (client != null && client.Connected) client.Send(line);
@@ -105,6 +106,7 @@ namespace RimWorldFPS
                 WeatherReport.Reset();
                 FleckReport.Reset();
                 StatusReport.Reset();
+            HealthCard.Reset();
                 RimView.Drop();
                 return;
             }
@@ -130,6 +132,8 @@ namespace RimWorldFPS
             if (flora != null) SendAfterArt(flora);
             string status = StatusReport.Poll();
             if (status != null) client.Send(status);
+            string card = HealthCard.Take();
+            if (card != null) client.Send(card);
             string doors = DoorReport.Poll();
             if (doors != null) client.Send(doors);
             foreach (string line in EffectsReport.Poll())

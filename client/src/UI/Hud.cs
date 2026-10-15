@@ -36,7 +36,7 @@ public sealed class Hud
     private static readonly Dictionary<string, Vector2> BaseSize = new()
     {
         ["minimap"] = new(300, 300),
-        ["status"] = new(400, 250),
+        ["status"] = new(472, 322),
         ["weapon"] = new(340, 116),
         ["compass"] = new(560, 46),
         ["messages"] = new(560, 120),
@@ -46,7 +46,7 @@ public sealed class Hud
     private static readonly Dictionary<string, string> Names = new()
     {
         ["minimap"] = "MINIMAP (RimWorld's view)",
-        ["status"] = "PAWN",
+        ["status"] = "HEALTH (RimWorld's health tab)",
         ["weapon"] = "WEAPON",
         ["compass"] = "COMPASS",
         ["messages"] = "MESSAGES",
@@ -302,79 +302,93 @@ public sealed class Hud
         return pictures.Get(grid.FloorSkin[i]) is Pic floor ? floor.Average : new Color(110, 92, 66, 255);
     }
 
-    /// <summary>The pawn preview: the colonist as RimWorld draws them, each limb's health beside
-    /// it as RimWorld's health tab counts it, and how they are: health, pain, bleeding, mood.</summary>
+    private Texture2D card;
+    private int cardRev = -1;
+
+    /// <summary>The colonist's health: RimWorld's own Health tab, as the mod draws it (so a mod
+    /// that changes the tab, such as Nice Health Tab, shows here too), fitted into the widget.
+    /// Until the first picture comes, the same things laid out as the tab lays them out: the
+    /// overview on the left, each hurt part and what is wrong with it on the right.</summary>
     private void StatusWidget(HudFrame f, Rectangle r)
     {
-        Ui.Panel(r);
         PawnState? pawn = f.Link.Player;
+        if (f.Link.HealthCardRev != cardRev && f.Link.HealthCardPng is byte[] png)
+        {
+            cardRev = f.Link.HealthCardRev;
+            Image image = Raylib.LoadImageFromMemory(".png", png);
+            if (image.Width > 0)
+            {
+                if (card.Id != 0) Raylib.UnloadTexture(card);
+                card = Raylib.LoadTextureFromImage(image);
+                Raylib.SetTextureFilter(card, TextureFilter.Bilinear);
+            }
+            Raylib.UnloadImage(image);
+        }
+        if (card.Id != 0 && pawn != null && f.Link.HealthCardPawn == pawn.Id)
+        {
+            float k = Math.Min(r.Width / card.Width, r.Height / card.Height);
+            var dest = new Rectangle(r.X, r.Y, card.Width * k, card.Height * k);
+            Color tint = faceFlash > 0 ? new Color(255, 200, 196, 245) : new Color(255, 255, 255, 245);
+            Raylib.DrawTexturePro(card, new Rectangle(0, 0, card.Width, card.Height), dest, Vector2.Zero, 0, tint);
+            return;
+        }
+        HealthList(f, r, pawn);
+    }
+
+    /// <summary>The Health tab's layout, from the <c>status</c> report.</summary>
+    private void HealthList(HudFrame f, Rectangle r, PawnState? pawn)
+    {
+        Ui.Panel(r, new Color(21, 25, 29, 235));
         PawnStatus? st = f.Link.Status is PawnStatus s && pawn != null && s.Pawn == pawn.Id ? s : null;
         float k = r.Height / BaseSize["status"].Y;
-        float pad = 10 * k;
-        var figure = new Rectangle(r.X + pad, r.Y + pad, 150 * k, r.Height - 2 * pad);
-        if (pawn?.Art != null && f.Pictures.Get(pawn.Art[2]) is Pic face)
-        {
-            Color tint = faceFlash > 0 ? new Color(255, 140, 130, 255) : Color.White;
-            Rectangle body = Ui.Fit(f.Atlas, face, new Rectangle(figure.X + 22 * k, figure.Y + 16 * k, figure.Width - 44 * k, figure.Height - 30 * k), tint);
-            // Each limb's bar where that limb is on the picture (they face you: their right is your left).
-            (string part, float u, float v)[] limbs =
-            {
-                ("head", 0.5f, -0.02f), ("torso", 0.5f, 0.58f), ("right_arm", -0.12f, 0.5f),
-                ("left_arm", 1.12f, 0.5f), ("right_leg", 0.22f, 1.05f), ("left_leg", 0.78f, 1.05f),
-            };
-            foreach (var (part, u, v) in limbs)
-            {
-                float bw = 40 * k, bh = 7 * k;
-                float bx = body.X + body.Width * u - bw / 2, by = body.Y + body.Height * v - bh / 2;
-                (float health, bool missing) = st != null && st.Parts.TryGetValue(part, out var p) ? p : (1f, false);
-                if (st == null) health = f.Link.Snap?.Health ?? 1f;
-                Ui.Bar(bx, by, bw, bh, missing ? 0 : health, Ui.Health(missing ? 0 : health));
-                if (missing) Ui.Centred("X", bx + bw / 2, by - 6 * k, 14 * k, Ui.Red);
-            }
-        }
-        float tx = figure.X + figure.Width + 8 * k, tw = r.X + r.Width - pad - tx;
+        float pad = 12 * k, size = 15 * k, line = 21 * k;
+        float split = r.X + r.Width * 0.4f;
         float y = r.Y + pad;
-        Ui.Text((pawn?.Name ?? "Colonist").ToUpperInvariant(), tx, y, 22 * k, Ui.White);
+        string name = pawn?.Name ?? "Colonist";
+        Ui.Text(name, r.X + pad, y, 19 * k, Ui.White);
         y += 28 * k;
-        float health2 = st?.Health ?? f.Link.Snap?.Health ?? 1f;
-        Row("Health", health2, Ui.Health(health2), $"{health2 * 100:0}%");
-        if (st != null)
+        Raylib.DrawRectangleRec(new Rectangle(split, r.Y + pad, 1, r.Height - pad * 2), new Color(255, 255, 255, 40));
+        if (st == null)
         {
-            Row("Pain", st.Pain, st.Pain > 0.4f ? Ui.Orange : Ui.Grey, $"{st.Pain * 100:0}%");
-            if (st.Mood is float mood) Row("Mood", mood, mood < 0.35f ? Ui.Orange : Ui.Blue, $"{mood * 100:0}%");
-            if (st.Bleeding > 0.001f)
-            {
-                string hours = st.BleedHours is float bh ? $" - {bh:0.#}h left" : "";
-                Ui.Text($"Bleeding {st.Bleeding * 100:0}%/day{hours}", tx, y, 16 * k, Ui.Red);
-                y += 20 * k;
-            }
-            foreach (var (name, level) in st.Capacities)
-                if (level < 0.8f)
-                {
-                    Ui.Text($"{Title(name)} {level * 100:0}%", tx, y, 15 * k, level < 0.5f ? Ui.Red : Ui.Orange);
-                    y += 18 * k;
-                }
-            foreach (var (label, part, bleeding) in st.Conditions)
-            {
-                if (y > r.Y + r.Height - 22 * k) break;
-                string line = part != null ? $"{label} ({part})" : label;
-                while (line.Length > 4 && Ui.Width(line, 15 * k) > tw) line = line[..^1];
-                Ui.Text(line, tx, y, 15 * k, bleeding ? Ui.Red : Ui.Grey);
-                y += 18 * k;
-            }
+            Ui.Text("Waiting for RimWorld...", r.X + pad, y, size, Ui.Dim);
+            return;
         }
-        else
+        // Left: the overview.
+        void Row(string label, string value, Color color)
         {
-            float armor = f.Link.Snap?.Armor ?? 0;
-            Row("Armor", Math.Clamp(armor / 2f, 0, 1), Ui.Blue, $"{armor * 100:0}%");
+            if (y > r.Y + r.Height - line) return;
+            Ui.Text(label, r.X + pad, y, size, Ui.Grey);
+            Ui.Right(value, split - pad, y, size, color);
+            y += line;
         }
-
-        void Row(string name, float share, Color color, string value)
+        Row("Health", $"{st.Health * 100:0}%", Ui.Health(st.Health));
+        Row("Pain", st.Pain < 0.01f ? "None" : st.Pain < 0.15f ? "Minor" : st.Pain < 0.4f ? "Serious" : st.Pain < 0.8f ? "Intense" : "Extreme",
+            st.Pain < 0.15f ? Ui.Grey : st.Pain < 0.4f ? Ui.Orange : Ui.Red);
+        if (st.Bleeding > 0)
+            Row("Bleeding", st.BleedHours is float hours ? $"{hours:0.#}h left" : $"{st.Bleeding * 100:0}%/day", Ui.Red);
+        if (st.Mood is float mood) Row("Mood", $"{mood * 100:0}%", mood < 0.25f ? Ui.Red : mood < 0.45f ? Ui.Orange : Ui.Grey);
+        y += line * 0.3f;
+        foreach (var (cap, value) in st.Capacities)
+            Row(Title(cap), value <= 0 ? "None" : $"{value * 100:0}%", value >= 0.995f ? Ui.Grey : value >= 0.7f ? new Color(196, 206, 80, 255) : value >= 0.4f ? Ui.Orange : Ui.Red);
+        // Right: each part and what is wrong with it.
+        float rx = split + pad, ry = r.Y + pad + 28 * k;
+        var byPart = st.Conditions.GroupBy(c => c.part ?? "Whole body").ToList();
+        if (byPart.Count == 0) Ui.Text("No health conditions", rx, ry, size, Ui.Dim);
+        foreach (var group in byPart)
         {
-            Ui.Text(name, tx, y, 15 * k, Ui.Grey);
-            Ui.Right(value, tx + tw, y, 15 * k, Ui.White);
-            Ui.Bar(tx, y + 18 * k, tw, 6 * k, share, color);
-            y += 30 * k;
+            if (ry > r.Y + r.Height - line) break;
+            string part = Title(group.Key.Replace(' ', '_'));
+            float partHealth = st.Parts.TryGetValue(group.Key.Replace(' ', '_').ToLowerInvariant(), out var ph) ? ph.health : 1f;
+            Ui.Text(part, rx, ry, size, Ui.Health(partHealth));
+            float cy = ry;
+            foreach (var (label, _, bleeding) in group)
+            {
+                if (cy > r.Y + r.Height - line) break;
+                string text = bleeding ? label + "  (bleeding)" : label;
+                Ui.Right(text, r.X + r.Width - pad, cy, size, bleeding ? Ui.Red : Ui.White);
+                cy += line;
+            }
+            ry = Math.Max(cy, ry + line);
         }
     }
 

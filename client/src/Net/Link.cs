@@ -45,6 +45,12 @@ public sealed class Link
     public int DoorSteps = 16;
     public int DoorsRev;
     public PawnStatus? Status;
+    /// <summary>RimWorld's pictures as PNGs, by index, sent over the bridge.</summary>
+    public readonly Dictionary<int, byte[]> TextureData = new();
+    /// <summary>The played colonist's Health tab as RimWorld drew it (a PNG), and whose.</summary>
+    public byte[]? HealthCardPng;
+    public string? HealthCardPawn;
+    public int HealthCardRev;
     public int StatusRev;
     public Loot? Loot;
     public int LootRev;
@@ -191,6 +197,32 @@ public sealed class Link
             case "status":
                 Status = PawnStatus.Read(e);
                 StatusRev++;
+                break;
+            case "texture":
+                if (e.Str("png") is string data && data.Length > 0)
+                {
+                    try
+                    {
+                        TextureData[(int)e.Num("i", -1)] = Convert.FromBase64String(data);
+                    }
+                    catch (FormatException)
+                    {
+                    }
+                }
+                break;
+            case "health_card":
+                if (e.Str("png") is string card)
+                {
+                    try
+                    {
+                        HealthCardPng = Convert.FromBase64String(card);
+                        HealthCardPawn = e.Str("pawn");
+                        HealthCardRev++;
+                    }
+                    catch (FormatException)
+                    {
+                    }
+                }
                 break;
             case "loot":
                 Loot = Read.Loot(e);

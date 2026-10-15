@@ -8,10 +8,10 @@ using Verse;
 namespace RimWorldFPS
 {
     /// <summary>
-    /// M5: RimWorld's own art for the client. Copies a material's texture (or part of it) to a PNG,
-    /// <see cref="Size"/> pixels square and tinted as RimWorld draws it, under RimWorld's save
-    /// data folder, once per art and colour. The files stay on this computer; the client reads them
-    /// by the names in <see cref="Names"/>. Main thread only.
+    /// M5: RimWorld's own art for the client, read straight from the game's (and mods') loaded
+    /// textures: a material's texture (or part of it) as a PNG, <see cref="Size"/> pixels square
+    /// and tinted as RimWorld draws it, once per art and colour, kept in memory and sent over the
+    /// bridge (<c>texture</c> lines). No files are written. Main thread only.
     /// </summary>
     public static class TextureExport
     {
@@ -26,24 +26,19 @@ namespace RimWorldFPS
 
         private static readonly Dictionary<string, int> byKey = new Dictionary<string, int>();
         public static readonly List<string> Names = new List<string>();
+        /// <summary>Each picture's PNG, by index, as sent to the client.</summary>
+        public static readonly List<byte[]> Data = new List<byte[]>();
         /// <summary>Counts new names, so the list is sent again when it grows.</summary>
         public static int Revision;
-        private static string dir;
-
-        public static string Dir
+        /// <summary>The <c>texture</c> line of picture <paramref name="index"/>: its PNG.</summary>
+        public static string DataLine(int index)
         {
-            get
-            {
-                if (dir == null)
-                {
-                    dir = Path.Combine(GenFilePaths.SaveDataFolderPath, "RimWorldFPS", "textures");
-                    Directory.CreateDirectory(dir);
-                }
-                return dir;
-            }
+            byte[] png = index < Data.Count ? Data[index] : null;
+            return Json.Msg("texture").Num("i", index).Str("png", png != null ? Convert.ToBase64String(png) : "").ToString();
         }
 
-        /// <summary>The <c>textures</c> line: the folder and every name so far.</summary>
+        /// <summary>The <c>textures</c> line: every name so far (the pictures came in <c>texture</c>
+        /// lines; no folder).</summary>
         public static string Line()
         {
             var sb = new StringBuilder("[");
@@ -52,7 +47,7 @@ namespace RimWorldFPS
                 if (i > 0) sb.Append(',');
                 sb.Append('"').Append(Names[i]).Append('"');
             }
-            return Json.Msg("textures").Str("dir", Dir.Replace('\\', '/')).Raw("names", sb.Append(']').ToString()).ToString();
+            return Json.Msg("textures").Str("dir", "").Raw("names", sb.Append(']').ToString()).ToString();
         }
 
         /// <summary>
@@ -103,10 +98,11 @@ namespace RimWorldFPS
                     }
                 image.SetPixels32(out_);
                 image.Apply();
-                File.WriteAllBytes(Path.Combine(Dir, key + ".png"), image.EncodeToPNG());
+                byte[] png = image.EncodeToPNG();
                 UnityEngine.Object.Destroy(image);
                 index = Names.Count;
                 Names.Add(key);
+                Data.Add(png);
                 Revision++;
             }
             catch (Exception e)
@@ -155,10 +151,11 @@ namespace RimWorldFPS
                 RenderTexture.active = previous;
                 RenderTexture.ReleaseTemporary(square);
                 image.Apply();
-                File.WriteAllBytes(Path.Combine(Dir, key + ".png"), image.EncodeToPNG());
+                byte[] png = image.EncodeToPNG();
                 UnityEngine.Object.Destroy(image);
                 index = Names.Count;
                 Names.Add(key);
+                Data.Add(png);
                 Revision++;
             }
             catch (Exception e)

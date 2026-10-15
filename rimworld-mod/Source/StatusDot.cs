@@ -54,7 +54,11 @@ namespace RimWorldFPS
         [HarmonyPatch(typeof(UIRoot_Play), nameof(UIRoot_Play.UIRootOnGUI))]
         private static class InGame
         {
-            private static void Postfix() => Draw(true);
+            private static void Postfix()
+            {
+                Draw(true);
+                HealthCard.Update();
+            }
         }
 
         [HarmonyPatch(typeof(UIRoot_Entry), nameof(UIRoot_Entry.UIRootOnGUI))]

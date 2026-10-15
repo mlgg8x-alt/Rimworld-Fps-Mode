@@ -30,7 +30,7 @@ namespace RimWorldFPS
 
         private static Map sentMap;
         private static string sentRoofs, sentSkins, sentBuildings, sentItems, sentGlow, sentCosts;
-        private static int sentTextures = -1;
+        private static int sentTextures = -1, sentData;
         private static float lastCheck = -1f;
 
         public static void Reset()
@@ -38,6 +38,7 @@ namespace RimWorldFPS
             sentMap = null;
             sentRoofs = sentSkins = sentBuildings = sentItems = sentGlow = sentCosts = null;
             sentTextures = -1;
+            sentData = 0;
             lastCheck = -1f;
         }
 
@@ -50,7 +51,10 @@ namespace RimWorldFPS
         {
             if (TextureExport.Revision == sentTextures) return null;
             sentTextures = TextureExport.Revision;
-            return TextureExport.Line();
+            // The new pictures first, one line each, then the names.
+            var sb = new System.Text.StringBuilder();
+            for (; sentData < TextureExport.Data.Count; sentData++) sb.Append(TextureExport.DataLine(sentData)).Append('\n');
+            return sb.Append(TextureExport.Line()).ToString();
         }
 
         public static List<string> Poll()
