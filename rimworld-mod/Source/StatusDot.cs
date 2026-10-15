@@ -46,7 +46,9 @@ namespace RimWorldFPS
             string tip = online
                 ? (inGame ? "RimWorld FPS: online. Select a colonist and turn on \"FPS mode\"." : "RimWorld FPS: the client is running.")
                 : running ? "RimWorld FPS: the client is running but not connected yet (it connects when a game loads)."
-                : "RimWorld FPS: offline, the client is not running. Click to start it.";
+                : "RimWorld FPS: offline, the client is not running. Click to start it."
+                    + (ClientLauncher.Problem != null ? "\n\nProblem: " + ClientLauncher.Problem : "")
+                    + "\nClient log: " + ClientLauncher.LogPath;
             TooltipHandler.TipRegion(rect.ExpandedBy(4f), tip);
             if (!online && !running && Widgets.ButtonInvisible(rect.ExpandedBy(4f))) ClientLauncher.Restart();
         }

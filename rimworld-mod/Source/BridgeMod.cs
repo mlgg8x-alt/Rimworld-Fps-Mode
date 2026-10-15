@@ -14,10 +14,24 @@ namespace RimWorldFPS
         public BridgeMod(ModContentPack content) : base(content)
         {
             Settings = GetSettings<BridgeSettings>();
-            new Harmony(HarmonyId).PatchAll();
-            Application.quitting += BridgeGameComponent.Shutdown;
+            // The client first: nothing below may keep it from starting.
             Application.quitting += ClientLauncher.Stop;
             ClientLauncher.Start(content.RootDir);
+            // Each patch on its own, so one that does not fit this RimWorld (or another mod)
+            // costs only itself.
+            var harmony = new Harmony(HarmonyId);
+            foreach (System.Type type in AccessTools.GetTypesFromAssembly(typeof(BridgeMod).Assembly))
+            {
+                try
+                {
+                    harmony.CreateClassProcessor(type).Patch();
+                }
+                catch (System.Exception e)
+                {
+                    Log.Error($"[RimWorldFPS] patch {type.FullName} failed: {e.InnerException?.Message ?? e.Message}");
+                }
+            }
+            Application.quitting += BridgeGameComponent.Shutdown;
             RimView.RepairPrefs();
             Log.Message($"[RimWorldFPS] loaded, bridge target {Settings.Host}:{Settings.Port}");
         }

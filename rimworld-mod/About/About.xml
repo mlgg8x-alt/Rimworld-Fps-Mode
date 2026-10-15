@@ -20,5 +20,5 @@
   <incompatibleWith>
     <li>rimworldmw2.bridge</li>
   </incompatibleWith>
-  <description>Play your drafted colonists in first person, boomer shooter style: chunky pixels, a limited palette and RimWorld's own art standing in a Doom-like 3D view. RimWorld stays the game; the companion "boomer" client draws it. Needs the client from the project repo. Fork of RimWorld x MW2 by rkwitz, without Call of Duty.</description>
+  <description>Play your colonists in first person with RimWorld's own art. Select a colonist and turn on "FPS mode". The FPS client comes with the mod (Windows and Linux) and starts by itself with RimWorld; the dot in the top right corner is green while it is online. Fork of RimWorld x MW2 by rkwitz.</description>
 </ModMetaData>

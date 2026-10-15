@@ -44,7 +44,20 @@ public sealed class Bridge : IDisposable
         var (host, port) = Parse(address);
         listener = new TcpListener(host, port);
         listener.Server.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
-        listener.Start();
+        // The mod checks whether the port is taken by binding it for a moment: if that lands
+        // just as we start, try again shortly rather than fail.
+        for (int attempt = 0; ; attempt++)
+        {
+            try
+            {
+                listener.Start();
+                break;
+            }
+            catch (SocketException) when (attempt < 20)
+            {
+                Thread.Sleep(150);
+            }
+        }
         acceptThread = new Thread(Accept) { IsBackground = true, Name = "bridge accept" };
         acceptThread.Start();
     }

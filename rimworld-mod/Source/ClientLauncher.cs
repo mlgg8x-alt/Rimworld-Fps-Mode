@@ -1,6 +1,8 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.Net;
+using System.Net.Sockets;
 using UnityEngine;
 using Verse;
 
@@ -36,50 +38,91 @@ namespace RimWorldFPS
 
         private static bool running;
         private static float runningAt = -10f;
+        /// <summary>Why the client is not running, for the dot's tooltip; null when nothing went wrong.</summary>
+        public static string Problem;
 
-        /// <summary>The client is running (ours, or one started by hand); looked at once a second.</summary>
+        /// <summary>Something listens on the bridge's port (our client, or one started by hand):
+        /// tried by binding it, which needs no rights, unlike listing processes. Once a second.</summary>
         public static bool Running
         {
             get
             {
                 if (Time.realtimeSinceStartup - runningAt < 1f) return running;
                 runningAt = Time.realtimeSinceStartup;
-                try
-                {
-                    running = process != null && !process.HasExited || Process.GetProcessesByName("RimFpsClient").Length > 0;
-                }
-                catch (Exception)
-                {
-                    running = false;
-                }
+                running = PortInUse() || process != null && !HasExited(process);
                 return running;
+            }
+        }
+
+        private static bool PortInUse()
+        {
+            TcpListener probe = null;
+            try
+            {
+                probe = new TcpListener(IPAddress.Loopback, BridgeMod.Settings.Port);
+                probe.Start();
+                return false;
+            }
+            catch (SocketException)
+            {
+                return true;
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+            finally
+            {
+                try { probe?.Stop(); } catch (Exception) { }
+            }
+        }
+
+        private static bool HasExited(Process p)
+        {
+            try
+            {
+                return p.HasExited;
+            }
+            catch (Exception)
+            {
+                return true;
             }
         }
 
         /// <summary>At RimWorld's start.</summary>
         public static void Start(string modRoot)
         {
-            exe = Find(modRoot);
+            try
+            {
+                exe = Find(modRoot);
+            }
+            catch (Exception e)
+            {
+                exe = null;
+                Problem = "could not look for the client: " + e.Message;
+            }
             if (exe == null)
             {
-                Log.Warning($"[RimWorldFPS] no FPS client for {Application.platform} in {Path.Combine(modRoot, "Client")}; start one by hand");
+                Problem = Problem ?? $"no client for {Application.platform} in {Path.Combine(modRoot, "Client")}";
+                Log.Error("[RimWorldFPS] " + Problem);
                 return;
             }
+            Log.Message($"[RimWorldFPS] FPS client: {exe}");
             Launch();
         }
 
         private static void Launch()
         {
             if (!BridgeMod.Settings.LaunchClient || exe == null) return;
+            if (PortInUse())
+            {
+                Log.Message($"[RimWorldFPS] something already listens on port {BridgeMod.Settings.Port}: the FPS client is running");
+                Problem = null;
+                return;
+            }
+            if (Application.platform != RuntimePlatform.WindowsPlayer) MakeRunnable(exe);
             try
             {
-                if (Process.GetProcessesByName("RimFpsClient").Length > 0)
-                {
-                    Log.Message("[RimWorldFPS] the FPS client is already running");
-                    return;
-                }
-                if (Application.platform == RuntimePlatform.LinuxPlayer)
-                    using (Process.Start(new ProcessStartInfo("chmod", $"+x \"{exe}\"") { UseShellExecute = false, CreateNoWindow = true })) { }
                 int self = Process.GetCurrentProcess().Id;
                 var info = new ProcessStartInfo(exe, $"--background --parent {self} --address {BridgeMod.Settings.Host}:{BridgeMod.Settings.Port}")
                 {
@@ -89,12 +132,37 @@ namespace RimWorldFPS
                 };
                 process = Process.Start(info);
                 runningAt = -10f;
-                Log.Message($"[RimWorldFPS] started the FPS client in the background ({exe}, process {process?.Id})");
+                Problem = null;
+                Log.Message($"[RimWorldFPS] started the FPS client in the background (process {process?.Id}); its log: {LogPath}");
             }
             catch (Exception e)
             {
-                Log.Warning($"[RimWorldFPS] could not start the FPS client ({exe}): {e.Message}");
+                Problem = $"could not start {exe}: {e.Message}";
+                Log.Error("[RimWorldFPS] " + Problem);
                 process = null;
+            }
+        }
+
+        /// <summary>Where the client writes its log (it starts it fresh each run).</summary>
+        public static string LogPath => Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "RimWorldFPS", "client.log");
+
+        /// <summary>Linux and macOS: the program marked runnable (unzipping often drops that).</summary>
+        private static void MakeRunnable(string path)
+        {
+            foreach (string chmod in new[] { "/bin/chmod", "/usr/bin/chmod", "chmod" })
+            {
+                try
+                {
+                    if (chmod.StartsWith("/") && !File.Exists(chmod)) continue;
+                    using (Process p = Process.Start(new ProcessStartInfo(chmod, $"+x \"{path}\"") { UseShellExecute = false, CreateNoWindow = true }))
+                        p?.WaitForExit(3000);
+                    return;
+                }
+                catch (Exception e)
+                {
+                    Log.Warning($"[RimWorldFPS] could not mark the client runnable with {chmod}: {e.Message}");
+                }
             }
         }
 
@@ -103,7 +171,12 @@ namespace RimWorldFPS
         {
             if (exe == null || !BridgeMod.Settings.LaunchClient || Time.realtimeSinceStartup < nextCheck) return;
             nextCheck = Time.realtimeSinceStartup + 5f;
-            if (Running || restarts >= MaxRestarts) return;
+            if (Running) return;
+            if (restarts >= MaxRestarts)
+            {
+                Problem = Problem ?? $"the client keeps stopping; see its log: {LogPath}";
+                return;
+            }
             restarts++;
             Log.Message($"[RimWorldFPS] the FPS client stopped; starting it again ({restarts}/{MaxRestarts})");
             Launch();
@@ -114,7 +187,7 @@ namespace RimWorldFPS
         {
             restarts = 0;
             nextCheck = 0;
-            if (exe == null) Log.Warning("[RimWorldFPS] no FPS client for this computer in the mod's Client folder");
+            if (exe == null) Log.Error("[RimWorldFPS] " + (Problem ?? "no FPS client for this computer in the mod's Client folder"));
             else Launch();
         }
 
@@ -123,7 +196,7 @@ namespace RimWorldFPS
         {
             try
             {
-                if (process != null && !process.HasExited) process.Kill();
+                if (process != null && !HasExited(process)) process.Kill();
             }
             catch (Exception)
             {

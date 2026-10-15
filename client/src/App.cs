@@ -414,7 +414,11 @@ public sealed class App : IDisposable
             hidden = hide;
             if (Native.Windows && ownWindow != 0) Native.Show(ownWindow, !hide);
             else if (hide) Raylib.SetWindowState(ConfigFlags.HiddenWindow);
-            else Raylib.ClearWindowState(ConfigFlags.HiddenWindow);
+            else
+            {
+                Raylib.ClearWindowState(ConfigFlags.HiddenWindow);
+                Raylib.SetWindowFocused();
+            }
             if (!hide && settings.Fullscreen && !fullscreen && !Raylib.IsWindowFullscreen())
             {
                 Raylib.ToggleBorderlessWindowed();
