@@ -7,8 +7,10 @@
    **below Harmony**, and restart RimWorld. Disable the original "RimWorld MW2" mod if
    you have it.
 3. Run `RimFpsClient.exe` (any folder). Leave it open; RimWorld connects to it by itself
-   on 127.0.0.1:47820 (either can start first). `RimFpsClient.exe --demo` runs it without
-   RimWorld, against a made-up colony.
+   on 127.0.0.1:47820 (either can start first).
+
+**UI sample:** `UI sample (demo).bat` runs the client alone against a made-up colony, straight
+into edit mode, so you can lay out the HUD and pose the weapons without RimWorld.
 
 ## Controls
 
@@ -21,9 +23,10 @@ F2 edit HUD, F3 FPS counter.
 
 1. **Connection**: load a save. The client window should say it's connected. RimWorld's log shows `[RimWorldFPS]` hello.
 2. **Map**: walls, floors, doors, trees, furniture, lamps all show with your real textures. Note anything missing or invisible, and anything from mods.
-3. **Taking control**: draft a colonist, use the **Play in first person** gizmo. The client comes to the front as that colonist.
+3. **FPS mode gizmo**: select any colonist; the **FPS mode** toggle drafts them and the client comes to the front playing them. Turning it off hands them back. RimWorld's own UI stays up in FPS mode for debugging (Mod settings > RimWorld FPS Mode to hide it).
 4. **Movement**: walk around; the colonist moves in RimWorld too. Walls and closed doors block you; E opens doors.
-5. **Guns**: try a vanilla rifle, pistol and **at least one modded gun**. Check the 3D held model looks right (not huge, not mirrored, hands on the grip), aiming, recoil, reload, ammo/burst count.
+5. **Guns**: try a vanilla rifle, pistol and **at least one modded gun**. The gun is RimWorld's own flat picture turned into the view. Check aiming, recoil, reload, ammo/burst count.
+5b. **Weapon editor (F2)**: with a weapon in hand, drag the gun to move it, right-drag to turn, wheel to size; drag the hands and the orange muzzle dot; use the panel's sliders, Hip/Aiming tabs, hands count, "Use this pose for all guns". Restart: poses stick.
 6. **Damage**: shoot a raider; they get real RimWorld damage on real body parts (check their health tab).
 7. **Melee**: equip a knife, longsword, club, and a modded melee weapon. Left click swings (only hits when adjacent). V bashes with a gun.
 8. **Grenades**: G throws with frag grenades equipped.

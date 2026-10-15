@@ -347,7 +347,8 @@ namespace RimWorldFPS
             };
             target = corner;
             int side = (int)target.width;
-            if (Find.UIRoot?.screenshotMode != null) Find.UIRoot.screenshotMode.Active = true;
+            // While testing, RimWorld's own UI stays up in the minimap unless the player hides it.
+            if (Find.UIRoot?.screenshotMode != null && BridgeMod.Settings.HideUiInMinimap) Find.UIRoot.screenshotMode.Active = true;
             Screen.SetResolution(side, side, FullScreenMode.Windowed);
             overlaid = true;
             placed = false;

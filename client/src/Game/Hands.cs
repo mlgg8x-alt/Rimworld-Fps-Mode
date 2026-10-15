@@ -25,6 +25,28 @@ public sealed class Hands : IDisposable
     /// <summary>How far aimed down the sights, 0 to 1, for the camera's zoom.</summary>
     public float Aim => aim;
 
+    /// <summary>The camera the weapon is drawn with: the eye, looking down -z.</summary>
+    public static readonly Camera3D Camera = new(Vector3.Zero, new Vector3(0, 0, -1), Vector3.UnitY, 54f, CameraProjection.Perspective);
+
+    /// <summary>Set while the HUD is edited: the weapon held still, at the hip (0) or aimed (1).</summary>
+    public float? Hold;
+
+    /// <summary>The weapon drawn last frame, for the editor: its model, picture, pose, and
+    /// where its hands and muzzle were in view space.</summary>
+    public WeaponModel? Shown { get; private set; }
+    public string ShownName { get; private set; } = "";
+    public Matrix4x4 ShownPose { get; private set; }
+    public Vector3 ShownGrip { get; private set; }
+    public Vector3? ShownFore { get; private set; }
+    public Vector3? ShownMuzzle { get; private set; }
+
+    /// <summary>Where the hands and the muzzle are on a weapon, in its model space: as the
+    /// player put them, else as its outline says.</summary>
+    public static Vector2 GripOf(WeaponModel m, WeaponPose p) => p.GripU >= 0 ? new(p.GripU * m.Length, p.GripV * m.Height) : m.Grip;
+    public static Vector2 ForeOf(WeaponModel m, WeaponPose p) => p.ForeU >= 0 ? new(p.ForeU * m.Length, p.ForeV * m.Height) : m.Fore;
+    public static Vector2 MuzzleOf(WeaponModel m, WeaponPose p) => p.MuzzleU >= 0 ? new(p.MuzzleU * m.Length, p.MuzzleV * m.Height) : m.Muzzle;
+    public static bool TwoHands(WeaponModel m, WeaponPose p) => p.HandCount == 2 || p.HandCount == 0 && m.TwoHanded && !m.Melee;
+
     private WeaponModel? Model(Pictures pictures, Held held)
     {
         if (models.TryGetValue(held.Tex, out WeaponModel? m)) return m;
@@ -66,14 +88,14 @@ public sealed class Hands : IDisposable
         PawnState? pawn = link.Player;
         if (pawn == null) return;
         handPic ??= art.Hand;
-        var camera = new Camera3D(Vector3.Zero, new Vector3(0, 0, -1), Vector3.UnitY, 54f, CameraProjection.Perspective);
-        Raylib.BeginMode3D(camera);
+        Shown = null;
+        Raylib.BeginMode3D(Camera);
         Rlgl.DisableBackfaceCulling();
         renderer.HeldTint(light);
         var (skin, _) = Colours(link, pawn.Id);
-        float bob = settings.Bob ? player.Moving * (1f - aim * 0.85f) : 0f;
+        float bob = settings.Bob && Hold == null ? player.Moving * (1f - aim * 0.85f) : 0f;
         var bobbing = new Vector3(MathF.Sin(player.BobPhase) * 0.011f * bob, -MathF.Abs(MathF.Cos(player.BobPhase)) * 0.012f * bob + MathF.Sin(time * 1.7f) * 0.002f, 0);
-        var sway = new Vector3(swayX, swayY, 0);
+        var sway = Hold == null ? new Vector3(swayX, swayY, 0) : Vector3.Zero;
         var hands = new List<(Vector3 at, float size)>();
         Vector3? flashAt = null;
         float flashSize = 0;
@@ -81,23 +103,30 @@ public sealed class Hands : IDisposable
         WeaponModel? model = pawn.Held != null ? Model(pictures, pawn.Held) : null;
         if (model != null && gun.Kind != Gun.Mode.Throw)
         {
-            Matrix4x4 pose = model.Melee ? MeleePose(model, gun) : GunPose(model, gun);
+            string name = pictures.Name(pawn.Held!.Tex);
+            WeaponPose wp = settings.PoseFor(name, model.Melee);
+            Matrix4x4 pose = model.Melee ? MeleePose(model, gun, wp) : GunPose(model, gun, wp);
             pose *= Matrix4x4.CreateTranslation(bobbing + sway);
             model.Draw(renderer.HeldMaterial(model.Page), Matrix4x4.Transpose(pose));
-            Vector3 grip = Vector3.Transform(new Vector3(model.Grip, 0), pose);
-            hands.Add((grip + new Vector3(0, 0, 0.012f), 0.017f));
-            if (!model.Melee)
+            Vector3 grip = Vector3.Transform(new Vector3(GripOf(model, wp), 0), pose);
+            float hand = wp.HandSize;
+            hands.Add((grip + new Vector3(0, 0, 0.012f), 0.017f * hand));
+            Vector3? fore = null;
+            if (TwoHands(model, wp)) fore = Vector3.Transform(new Vector3(ForeOf(model, wp), 0), pose);
+            else if (!model.Melee) hands.Add((grip + new Vector3(-0.018f, -0.012f, 0.004f), 0.016f * hand));
+            if (fore is Vector3 f) hands.Add((f + new Vector3(0, -0.004f, 0.01f), 0.016f * hand));
+            Vector3 tip = Vector3.Transform(new Vector3(MuzzleOf(model, wp), 0), pose);
+            if (!model.Melee && flash > 0 && Hold == null)
             {
-                Vector3 fore = model.TwoHanded
-                    ? Vector3.Transform(new Vector3(model.Fore, 0), pose)
-                    : grip + new Vector3(-0.018f, -0.012f, 0.004f);
-                hands.Add((fore + new Vector3(0, -0.004f, 0.01f), 0.016f));
-                if (flash > 0)
-                {
-                    flashAt = Vector3.Transform(new Vector3(model.Muzzle + new Vector2(0.03f, 0), 0), pose);
-                    flashSize = 0.06f + 0.03f * (float)Random.Shared.NextDouble();
-                }
+                flashAt = Vector3.Transform(new Vector3(MuzzleOf(model, wp) + new Vector2(0.03f, 0), 0), pose);
+                flashSize = 0.06f + 0.03f * (float)Random.Shared.NextDouble();
             }
+            Shown = model;
+            ShownName = name;
+            ShownPose = pose;
+            ShownGrip = grip;
+            ShownFore = fore;
+            ShownMuzzle = model.Melee ? null : tip;
         }
         else if (gun.Kind == Gun.Mode.Throw)
         {
@@ -145,24 +174,18 @@ public sealed class Hands : IDisposable
         Raylib.EndMode3D();
     }
 
-    /// <summary>A gun at the hip, or up at the eye when aiming; lowered to run, dipped while
-    /// it cycles, kicked by each shot, thrust out to bash.</summary>
-    private Matrix4x4 GunPose(WeaponModel m, Gun gun)
+    /// <summary>A gun at the hip, or up at the eye when aiming, as the player placed it; lowered
+    /// to run, dipped while it cycles, kicked by each shot, thrust out to bash.</summary>
+    private Matrix4x4 GunPose(WeaponModel m, Gun gun, WeaponPose wp)
     {
-        float viewLength = Math.Clamp(m.Length * 0.27f, 0.14f, 0.38f);
-        float scale = viewLength / m.Length;
-        Matrix4x4 size = Matrix4x4.CreateScale(scale);
-        var grip3 = new Vector3(m.Grip, 0);
-        // At the hip: down and to the right, turned a touch inwards.
-        Matrix4x4 hipTurn = Turn(-1f, 4f, 0f);
-        Vector3 hipGrip = new(0.115f, -0.118f, -0.3f);
-        Matrix4x4 hip = size * Ahead * hipTurn;
-        hip *= Matrix4x4.CreateTranslation(hipGrip - Vector3.Transform(grip3, hip));
-        // Aiming: brought in under the middle of the view, held out at arm's length so the
-        // stock stays off the eye, turned a little so its side still shows (RimWorld's weapons
-        // have no sights to look down).
-        Matrix4x4 ads = size * Ahead * Turn(2f, 5f, 0f);
-        ads *= Matrix4x4.CreateTranslation(new Vector3(0.045f, -0.085f, -0.3f) - Vector3.Transform(grip3, ads));
+        float scale = Math.Clamp(m.Length * 0.22f, 0.12f, 0.32f) / m.Length * wp.Size;
+        Matrix4x4 size = Matrix4x4.CreateScale(scale, scale, scale * wp.Depth);
+        var grip3 = new Vector3(GripOf(m, wp), 0);
+        Matrix4x4 hip = size * Ahead * Turn(wp.Pitch, wp.Yaw, wp.Roll);
+        hip *= Matrix4x4.CreateTranslation(new Vector3(wp.X, wp.Y, wp.Z) - Vector3.Transform(grip3, hip));
+        Matrix4x4 ads = size * Ahead * Turn(wp.AimPitch, wp.AimYaw, wp.AimRoll);
+        ads *= Matrix4x4.CreateTranslation(new Vector3(wp.AimX, wp.AimY, wp.AimZ) - Vector3.Transform(grip3, ads));
+        if (Hold is float held) return Blend(hip, ads, held);
         Matrix4x4 pose = Blend(hip, ads, aim);
         float kick = gun.Kick * gun.Kick;
         float cycle = gun.Kind == Gun.Mode.Gun && gun.Cycle > 0
@@ -176,20 +199,23 @@ public sealed class Hands : IDisposable
         return pose * around;
     }
 
-    /// <summary>A melee weapon held up over the right shoulder; a swing sweeps it down and across.</summary>
-    private Matrix4x4 MeleePose(WeaponModel m, Gun gun)
+    /// <summary>A melee weapon held up as the player placed it (over the right shoulder unless
+    /// moved); a swing sweeps it down and across.</summary>
+    private Matrix4x4 MeleePose(WeaponModel m, Gun gun, WeaponPose wp)
     {
-        float viewLength = Math.Clamp(m.Length * 0.24f, 0.11f, 0.32f);
-        Matrix4x4 size = Matrix4x4.CreateScale(viewLength / m.Length);
-        var grip3 = new Vector3(m.Grip, 0);
-        float t = gun.Swing >= 0 ? gun.Swing : 0;
+        float scale = Math.Clamp(m.Length * 0.24f, 0.11f, 0.32f) / m.Length * wp.Size;
+        Matrix4x4 size = Matrix4x4.CreateScale(scale, scale, scale * wp.Depth);
+        var grip3 = new Vector3(GripOf(m, wp), 0);
+        float live = Hold == null ? 1f : 0f;
+        float t = gun.Swing >= 0 ? gun.Swing * live : 0;
         float eased = t * t * (3 - 2 * t);
-        float back = t < 0.25f ? t / 0.25f : 1f;
-        // Raised: blade up and a little forward; struck: down and across to the left.
-        float pitch = 62f - eased * 95f + (1 - back) * 8f - sprint * 20f;
-        float yaw = 18f + eased * 55f + sprint * 20f;
-        float roll = -12f - eased * 40f + swayRoll;
-        Vector3 hand = Vector3.Lerp(new Vector3(0.15f, -0.115f, -0.3f), new Vector3(-0.05f, -0.15f, -0.34f), eased) + new Vector3(0, -sprint * 0.04f, 0);
+        float windup = t > 0 && t < 0.25f ? MathF.Sin(t / 0.25f * MathF.PI) * 8f : 0f;
+        float run = sprint * live;
+        float pitch = wp.Pitch + windup - eased * 95f - run * 20f;
+        float yaw = wp.Yaw + eased * 55f + run * 20f;
+        float roll = wp.Roll - eased * 40f + swayRoll * live;
+        var rest = new Vector3(wp.X, wp.Y, wp.Z);
+        Vector3 hand = Vector3.Lerp(rest, rest + new Vector3(-0.2f, -0.035f, -0.04f), eased) + new Vector3(0, -run * 0.04f, 0);
         Matrix4x4 pose = size * Ahead * Turn(pitch, yaw, roll);
         pose *= Matrix4x4.CreateTranslation(hand - Vector3.Transform(grip3, pose));
         return pose;

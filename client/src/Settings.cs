@@ -18,6 +18,55 @@ public sealed class Widget
     public Widget Copy() => (Widget)MemberwiseClone();
 }
 
+/// <summary>How a weapon is held, set in the HUD's edit mode: where its grip sits in front of
+/// the eye (x right, y up, -z ahead) and how it is turned, at the hip and when aiming; its
+/// size and thickness against the automatic ones; and where the hands and the muzzle are on
+/// its picture (u from its back end, v up from its bottom, 0 to 1; below 0 means found
+/// automatically from its outline).</summary>
+public sealed class WeaponPose
+{
+    public float X { get; set; }
+    public float Y { get; set; }
+    public float Z { get; set; }
+    public float Yaw { get; set; }
+    public float Pitch { get; set; }
+    public float Roll { get; set; }
+    public float AimX { get; set; }
+    public float AimY { get; set; }
+    public float AimZ { get; set; }
+    public float AimYaw { get; set; }
+    public float AimPitch { get; set; }
+    public float AimRoll { get; set; }
+    public float Size { get; set; } = 1f;
+    public float Depth { get; set; } = 1f;
+    public float HandSize { get; set; } = 1f;
+    /// <summary>0 automatic, 1 one hand, 2 two hands.</summary>
+    public int HandCount { get; set; }
+    public float GripU { get; set; } = -1f;
+    public float GripV { get; set; } = -1f;
+    public float ForeU { get; set; } = -1f;
+    public float ForeV { get; set; } = -1f;
+    public float MuzzleU { get; set; } = -1f;
+    public float MuzzleV { get; set; } = -1f;
+
+    public WeaponPose Copy() => (WeaponPose)MemberwiseClone();
+
+    /// <summary>A gun: low at the right hip, turned in so its side shows; aimed, under the
+    /// middle of the view.</summary>
+    public static WeaponPose Gun() => new()
+    {
+        X = 0.13f, Y = -0.125f, Z = -0.34f, Yaw = 26f, Pitch = 3f, Roll = -4f,
+        AimX = 0.04f, AimY = -0.09f, AimZ = -0.36f, AimYaw = 12f, AimPitch = 2f, AimRoll = 0f,
+    };
+
+    /// <summary>A melee weapon: raised over the right shoulder, ready to swing.</summary>
+    public static WeaponPose Melee() => new()
+    {
+        X = 0.15f, Y = -0.115f, Z = -0.3f, Yaw = 22f, Pitch = 60f, Roll = -12f,
+        AimX = 0.15f, AimY = -0.115f, AimZ = -0.3f, AimYaw = 22f, AimPitch = 60f, AimRoll = -12f,
+    };
+}
+
 /// <summary>
 /// The player's options, saved between runs (in the user's application data folder, as
 /// <c>RimWorldFPS/client.json</c>). Environment variables set before starting win over the
@@ -54,6 +103,15 @@ public sealed class Settings
     public bool ShowFps { get; set; }
     public bool HoldToAim { get; set; } = true;
     public Dictionary<string, Widget> Hud { get; set; } = DefaultHud();
+    /// <summary>How each weapon is held, by its RimWorld picture; <c>*gun</c> and <c>*melee</c>
+    /// for every weapon without its own.</summary>
+    public Dictionary<string, WeaponPose> Weapons { get; set; } = new();
+
+    /// <summary>The way the weapon with picture <paramref name="name"/> is held.</summary>
+    public WeaponPose PoseFor(string name, bool melee) =>
+        Weapons.TryGetValue(name, out WeaponPose? own) ? own
+        : Weapons.TryGetValue(melee ? "*melee" : "*gun", out WeaponPose? all) ? all
+        : melee ? WeaponPose.Melee() : WeaponPose.Gun();
 
     [JsonIgnore] public bool Retro => Style == "retro";
     /// <summary>Pixels a RimWorld picture keeps on its long side (RimWorld saves 128).</summary>

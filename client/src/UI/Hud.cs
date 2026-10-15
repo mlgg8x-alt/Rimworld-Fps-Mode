@@ -63,6 +63,9 @@ public sealed class Hud
     private Vector2 grab;
 
     public bool Editing;
+
+    /// <summary>The mouse is on a widget, or dragging one: the weapon editor leaves it alone.</summary>
+    public bool Busy(Vector2 mouse) => dragging != null || rects.Values.Any(r => Raylib.CheckCollisionPointRec(mouse, r));
     /// <summary>The layout changed (moved, resized, shown, hidden): the minimap's place goes to RimWorld.</summary>
     public bool LayoutChanged = true;
 
@@ -488,11 +491,12 @@ public sealed class Hud
         string[] lines =
         {
             "EDIT HUD",
-            "Drag to move  -  Wheel to resize  -  Right click to hide or show",
+            "Widgets: drag to move  -  Wheel to resize  -  Right click to hide or show  -  R to reset",
             "Minimap: middle click round or square, Shift + wheel to zoom",
-            "R to reset  -  F2 or Esc when done",
+            "Weapon: drag it, right-drag to turn, wheel to size; drag the hands and muzzle; panel on the right",
+            "F2 or Esc when done",
         };
-        float y = h * 0.42f;
+        float y = h * 0.2f;
         for (int i = 0; i < lines.Length; i++)
         {
             Ui.Centred(lines[i], w / 2f, y, Ui.S(i == 0 ? 30 : 18), i == 0 ? Ui.Gold : Ui.White);

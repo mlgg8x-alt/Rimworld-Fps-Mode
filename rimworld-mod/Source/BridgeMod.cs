@@ -31,6 +31,7 @@ namespace RimWorldFPS
             string port = Settings.Port.ToString();
             list.TextFieldNumericLabeled("Port", ref Settings.Port, ref port, 1, 65535);
             list.CheckboxLabeled("Connect automatically when a game loads", ref Settings.AutoConnect);
+            list.CheckboxLabeled("Hide RimWorld's UI in FPS mode (off keeps it up for debugging)", ref Settings.HideUiInMinimap);
             list.End();
         }
     }
@@ -40,12 +41,16 @@ namespace RimWorldFPS
         public string Host = "127.0.0.1";
         public int Port = 47820;
         public bool AutoConnect = true;
+        /// <summary>RimWorld's UI hidden while its window is the client's minimap. Off for now, so
+        /// the UI stays up for debugging.</summary>
+        public bool HideUiInMinimap;
 
         public override void ExposeData()
         {
             Scribe_Values.Look(ref Host, "host", "127.0.0.1");
             Scribe_Values.Look(ref Port, "port", 47820);
             Scribe_Values.Look(ref AutoConnect, "autoConnect", true);
+            Scribe_Values.Look(ref HideUiInMinimap, "hideUiInMinimap", false);
         }
     }
 }

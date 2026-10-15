@@ -48,6 +48,7 @@ public sealed class App : IDisposable
     private readonly Figures figures = new();
     private readonly Gun gun = new();
     private readonly Hands hands = new();
+    private readonly WeaponEditor weaponEditor = new();
     private readonly Projectiles projectiles = new();
     private readonly Effects effects = new();
     private readonly Scenery scenery = new();
@@ -279,7 +280,7 @@ public sealed class App : IDisposable
         figures.Update(link.Snap, dt);
         effects.Update(dt, gameDt);
         hud.Update(dt, link);
-        if (hud.Editing) hud.Edit(Raylib.GetScreenWidth(), Raylib.GetScreenHeight());
+        if (hud.Editing && !weaponEditor.Captured) hud.Edit(Raylib.GetScreenWidth(), Raylib.GetScreenHeight());
         Prompt();
         Draw(dt);
     }
@@ -540,6 +541,7 @@ public sealed class App : IDisposable
         if (!automap.Open)
         {
             Color here = LitAt(player.X, player.Z, 1f);
+            hands.Hold = hud.Editing ? (weaponEditor.AimTab ? 1f : 0f) : null;
             hands.Draw(link, player, gun, pictures, atlas, art, renderer, settings, new Vector3(here.R, here.G, here.B) / 255f * 1.05f);
         }
         renderer.EndScene();
@@ -574,10 +576,11 @@ public sealed class App : IDisposable
             Overlay = link.Overlay,
             Mouse = mouse,
         });
+        if (hud.Editing) weaponEditor.Draw(hands, settings, ww, wh, hud.Busy(mouse));
         if (!link.Connected) Ui.Centred($"Waiting for RimWorld on {settings.Address}", ww / 2f, wh / 2f - Ui.S(20), Ui.S(26), Ui.Gold);
         else if (!grid.Ready) Ui.Centred("Loading RimWorld's map...", ww / 2f, wh / 2f - Ui.S(20), Ui.S(26), Ui.Gold);
         else if (player.Flying && !hud.Editing)
-            Ui.Centred("Spectating: draft a colonist in RimWorld and click \"Play in first person\"", ww / 2f, wh - Ui.S(46), Ui.S(20), Ui.Grey);
+            Ui.Centred("Spectating: select a colonist in RimWorld and turn on \"FPS mode\"", ww / 2f, wh - Ui.S(46), Ui.S(20), Ui.Grey);
         loot.Draw(ww, wh, link, mouse, click && loot.Open, Send, hud);
         menu.Draw(ww, wh, mouse, click && menu.Open);
         if (settings.ShowFps)

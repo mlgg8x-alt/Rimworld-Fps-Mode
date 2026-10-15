@@ -5,12 +5,12 @@ using Raylib_cs;
 namespace RimFps.Game;
 
 /// <summary>
-/// A weapon in 3D, made from nothing but its RimWorld picture, so every weapon works, modded
-/// ones too: the picture is the weapon seen from the side, so it becomes the weapon's two flat
-/// sides, and every pixel along its outline grows a wall the colour of that pixel, giving the
-/// weapon its thickness (the way a voxel game turns a sprite into a held item). Where the hands
-/// go is read off its silhouette: the grip hangs below the body in the rear half, the barrel's
-/// underside takes the other hand, and the muzzle is the far end.
+/// A weapon to hold, made from nothing but its RimWorld picture, so every weapon works, modded
+/// ones too: the picture is the weapon seen from the side, kept flat and 2D, and turned in the
+/// view so perspective makes it read as solid; a thin stack of darker copies behind it gives
+/// it an edge. Where the hands go is read off its silhouette (the grip hangs below the body in
+/// the rear half, the barrel's underside takes the other hand, the muzzle is the far end), and
+/// the player can move all of it in the HUD's edit mode.
 ///
 /// Model space: x runs from the weapon's back (0) to its tip (<see cref="Length"/>), as RimWorld
 /// draws weapons pointing east; y is up; z is across, the thickness. Units are cells.
@@ -18,6 +18,8 @@ namespace RimFps.Game;
 public sealed class WeaponModel : IDisposable
 {
     public readonly List<Mesh> Meshes = new();
+    /// <summary>Copies of the picture that make up its thickness.</summary>
+    private const int Layers = 28;
     public int Page;
     public float Length, Height, Thickness;
     public bool Melee;
@@ -54,31 +56,17 @@ public sealed class WeaponModel : IDisposable
         Vector2 Uv(float x, float y) => pic.R.At(cu0 + cw * Math.Clamp(x / w, 0f, 1f), cv0 + ch * Math.Clamp(y / h, 0f, 1f));
 
         var builder = new MeshBuilder();
-        var face = new Color(255, 255, 255, 255);
-        var back = new Color(205, 205, 205, 255);
-        // The two flat sides: the picture, cut out by the shader.
-        builder.Quad(new(0, 0, t), new(L, 0, t), new(L, H, t), new(0, H, t), Uv(0, h), Uv(w, h), Uv(w, 0), Uv(0, 0), face);
-        builder.Quad(new(L, 0, -t), new(0, 0, -t), new(0, H, -t), new(L, H, -t), Uv(w, h), Uv(0, h), Uv(0, 0), Uv(w, 0), back);
-        // The walls round its outline, each the colour of the pixel it stands on (vertex alpha 0
-        // tells the shader not to cut them).
-        var top = new Color(255, 255, 255, 0);
-        var bottom = new Color(130, 130, 130, 0);
-        var end = new Color(185, 185, 185, 0);
-        for (int y = 0; y < h; y++)
-            for (int x = 0; x < w; x++)
-            {
-                if (!Solid(x, y)) continue;
-                Vector2 uv = Uv(x + 0.5f, y + 0.5f);
-                Vector2 a = At(x, y), b = At(x + 1, y + 1); // a top left, b bottom right
-                if (!Solid(x, y - 1))
-                    builder.Quad(new(a.X, a.Y, t), new(b.X, a.Y, t), new(b.X, a.Y, -t), new(a.X, a.Y, -t), uv, uv, uv, uv, top);
-                if (!Solid(x, y + 1))
-                    builder.Quad(new(a.X, b.Y, -t), new(b.X, b.Y, -t), new(b.X, b.Y, t), new(a.X, b.Y, t), uv, uv, uv, uv, bottom);
-                if (!Solid(x - 1, y))
-                    builder.Quad(new(a.X, b.Y, -t), new(a.X, b.Y, t), new(a.X, a.Y, t), new(a.X, a.Y, -t), uv, uv, uv, uv, end);
-                if (!Solid(x + 1, y))
-                    builder.Quad(new(b.X, b.Y, t), new(b.X, b.Y, -t), new(b.X, a.Y, -t), new(b.X, a.Y, t), uv, uv, uv, uv, end);
-            }
+        // The weapon stays RimWorld's flat picture, turned in the view so it reads as solid:
+        // the picture on both sides and a stack of darker copies between them, cut out the same
+        // way, which makes a clean edge of the right shape and colour without any blockiness.
+        for (int i = 0; i <= Layers; i++)
+        {
+            float z = -t + 2 * t * i / Layers;
+            bool side = i == 0 || i == Layers;
+            byte shade = (byte)(side ? (i == Layers ? 255 : 228) : 150 + 40 * Math.Abs(i - Layers / 2f) / (Layers / 2f));
+            var tint = new Color(shade, shade, shade, (byte)255);
+            builder.Quad(new(0, 0, z), new(L, 0, z), new(L, H, z), new(0, H, z), Uv(0, h), Uv(w, h), Uv(w, 0), Uv(0, 0), tint);
+        }
         model.Meshes.AddRange(builder.Finish());
         model.FindHands(Solid, w, h, At);
         return model;
