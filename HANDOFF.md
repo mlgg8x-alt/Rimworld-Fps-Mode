@@ -220,6 +220,10 @@ The same client sources (`client/src`) compiled for Android:
   other half of split screen), falling back to `/system/bin/am start`.
 - **Android pauses an app in the background**, so RimWorld must stay visible: play in split screen
   (RimDroid in one half, the app in the other) or RimWorld freezes while the app is in front.
+- The APK carries this handoff, TESTING.md, README.md and the whole source (`assets/source.zip`,
+  commit in `assets/COMMIT`); an APK opens as a zip.
+- The owner's phone runs **Android 16**. The library's segments are 16 KB aligned (needed on
+  16 KB page devices, Android 15+); targetSdk 34 installs fine there.
 - Verified here: the library links, exports `main` and `ANativeActivity_onCreate`, and needs only
   symbols Android 8 (API 26) provides; the APK is signed and verified. **Never run on a device.**
 

@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Builds the Android app: dist/RimWorldFPS-Android.apk (arm64, Android 8+, OpenGL ES 3).
+# Builds the Android app: dist/RimWorldFPS-Android.apk (arm64, Android 8 to 16+, OpenGL ES 3;
+# its native library is 16 KB page aligned, as Android 15+ devices may need). The APK carries the
+# handoff and the source in assets/.
 #
 # Needs the .NET 10 SDK, the Android NDK (r27c tested; ANDROID_NDK_HOME), the Android SDK with
 # build-tools 34.0.0 and platform android-34 (ANDROID_HOME), Java (keytool), git, make and zip.
@@ -29,7 +31,14 @@ dotnet publish "$here/RimFpsAndroid.csproj" -c Release -p:AndroidNdk="$NDK" -o "
 stage="$build/stage"
 rm -rf "$stage" && mkdir -p "$stage/lib/arm64-v8a"
 "$LLVM/llvm-strip" --strip-debug -o "$stage/lib/arm64-v8a/libmain.so" "$build/publish/libmain.so"
-"$BT/aapt2" link -o "$build/unsigned.apk" --manifest "$here/AndroidManifest.xml" -I "$JAR"
+# The handoff and the whole source ride along in the APK (assets/), so the project can be
+# picked up from the installed app alone (an APK opens as a zip).
+assets="$build/assets"
+rm -rf "$assets" && mkdir -p "$assets"
+cp "$root/HANDOFF.md" "$root/TESTING.md" "$root/README.md" "$assets/"
+(cd "$root" && git ls-files -z | grep -zv '^dist/' | xargs -0 zip -q -9 "$assets/source.zip")
+git -C "$root" rev-parse HEAD > "$assets/COMMIT"
+"$BT/aapt2" link -o "$build/unsigned.apk" --manifest "$here/AndroidManifest.xml" -I "$JAR" -A "$assets"
 (cd "$stage" && zip -q -r "$build/unsigned.apk" lib)
 "$BT/zipalign" -f -p 4 "$build/unsigned.apk" "$build/aligned.apk"
 if [ ! -f "$build/debug.keystore" ]; then
