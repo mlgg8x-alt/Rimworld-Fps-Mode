@@ -39,6 +39,7 @@ For testing (with --demo): --screenshot file.png [--frames N] [--yaw D] [--pitch
                 case "--keep-window": settings.OneWindow = false; break;
                 case "--background": launch.Background = true; settings.OneWindow = true; break;
                 case "--parent": launch.Parent = (int)Num(); break;
+                case "--touch": launch.Touch = true; break;
                 case "--screenshot": launch.Screenshot = Path.GetFullPath(Next()); break;
                 case "--frames": launch.Frames = (int)Num(); break;
                 case "--yaw": launch.Yaw = Num(); break;
@@ -75,6 +76,7 @@ For testing (with --demo): --screenshot file.png [--frames N] [--yaw D] [--pitch
                     return 2;
             }
         }
+        if (Platform.Native.Android && settings.DemoOnStart) launch.Demo = true;
         if (launch.Background)
         {
             // No console to write to: a log beside the settings, fresh each start.

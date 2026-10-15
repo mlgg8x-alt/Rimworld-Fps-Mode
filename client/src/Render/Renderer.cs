@@ -56,10 +56,10 @@ public sealed class Renderer : IDisposable
     public Renderer(Settings settings)
     {
         this.settings = settings;
-        world = Raylib.LoadShaderFromMemory(Shaders.WorldVertex, Shaders.WorldFragment);
-        sprite = Raylib.LoadShaderFromMemory(Shaders.WorldVertex, Shaders.WorldFragment);
-        palette = Raylib.LoadShaderFromMemory(Shaders.PlainVertex, Shaders.PaletteFragment);
-        held = Raylib.LoadShaderFromMemory(Shaders.WorldVertex, Shaders.HeldFragment);
+        world = Raylib.LoadShaderFromMemory(Shaders.ForPlatform(Shaders.WorldVertex), Shaders.ForPlatform(Shaders.WorldFragment));
+        sprite = Raylib.LoadShaderFromMemory(Shaders.ForPlatform(Shaders.WorldVertex), Shaders.ForPlatform(Shaders.WorldFragment));
+        palette = Raylib.LoadShaderFromMemory(Shaders.ForPlatform(Shaders.PlainVertex), Shaders.ForPlatform(Shaders.PaletteFragment));
+        held = Raylib.LoadShaderFromMemory(Shaders.ForPlatform(Shaders.WorldVertex), Shaders.ForPlatform(Shaders.HeldFragment));
         Set(world, "encoded", 1f);
         Set(sprite, "encoded", 0f);
         Set(held, "encoded", 2f);

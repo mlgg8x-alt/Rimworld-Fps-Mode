@@ -1,0 +1,53 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The Android app: the same client (../src), compiled ahead of time into one native library
+    (libmain.so) with raylib linked in, run by Android's NativeActivity. Build it with build.sh,
+    which also builds raylib for Android and packs and signs the APK.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>Library</OutputType>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>RimFps</RootNamespace>
+    <AssemblyName>libmain</AssemblyName>
+    <LangVersion>latest</LangVersion>
+    <NoWarn>$(NoWarn);CA1416</NoWarn>
+    <DefineConstants>$(DefineConstants);ANDROID</DefineConstants>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+
+    <PublishAot>true</PublishAot>
+    <NativeLib>Shared</NativeLib>
+    <RuntimeIdentifier>linux-bionic-arm64</RuntimeIdentifier>
+    <DisableUnsupportedError>true</DisableUnsupportedError>
+    <PublishAotUsingRuntimePack>true</PublishAotUsingRuntimePack>
+    <StripSymbols>false</StripSymbols>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <TrimMode>partial</TrimMode>
+    <JsonSerializerIsReflectionEnabledByDefault>true</JsonSerializerIsReflectionEnabledByDefault>
+
+    <AndroidNdk Condition="'$(AndroidNdk)' == ''">$(ANDROID_NDK_HOME)</AndroidNdk>
+    <RaylibAndroid Condition="'$(RaylibAndroid)' == ''">$(MSBuildThisFileDirectory)build/libraylib.a</RaylibAndroid>
+    <CppCompilerAndLinker>$(AndroidNdk)/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang</CppCompilerAndLinker>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="../src/**/*.cs" />
+    <Compile Include="AndroidMain.cs" />
+    <PackageReference Include="Raylib-cs" Version="8.1.0" />
+    <TrimmerRootAssembly Include="libmain" />
+    <!-- raylib and Android's log, linked straight in. -->
+    <DirectPInvoke Include="raylib" />
+    <DirectPInvoke Include="log" />
+    <NativeLibrary Include="$(RaylibAndroid)" />
+    <!-- Android starts the app through the glue's ANativeActivity_onCreate; raylib then calls our main. -->
+    <IlcArg Include="--export-dynamic-symbol:ANativeActivity_onCreate" />
+    <LinkerArg Include="-Wl,-u,ANativeActivity_onCreate" />
+    <!-- raylib reads files through the APK's assets by wrapping fopen. -->
+    <LinkerArg Include="-Wl,--wrap=fopen" />
+    <LinkerArg Include="-landroid;-llog;-lEGL;-lGLESv3;-lOpenSLES;-lm" />
+  </ItemGroup>
+
+</Project>

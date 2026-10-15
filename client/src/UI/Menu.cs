@@ -65,6 +65,8 @@ public sealed class Menu
             ($"Fullscreen when playing: {On(settings.Fullscreen)}", _ => settings.Fullscreen = !settings.Fullscreen),
             ($"Show FPS: {On(settings.ShowFps)}", _ => settings.ShowFps = !settings.ShowFps),
         };
+        if (Platform.Native.Android)
+            items.Add(($"Demo on next start (no RimWorld): {On(settings.DemoOnStart)}", _ => settings.DemoOnStart = !settings.DemoOnStart));
         if (settings.Retro)
         {
             items.Add(($"Retro lines: {settings.RenderHeight}", d => settings.RenderHeight = Step(settings.RenderHeight, d, new[] { 160, 180, 200, 240, 270, 360, 480 })));

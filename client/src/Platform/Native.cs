@@ -12,6 +12,17 @@ public static class Native
 {
     public static bool Windows => OperatingSystem.IsWindows();
 
+    /// <summary>The Android app (client/android): touch controls, the app's own data folder,
+    /// OpenGL ES shaders.</summary>
+#if ANDROID
+    public static readonly bool Android = true;
+#else
+    public static readonly bool Android = false;
+#endif
+
+    /// <summary>The Android app's private folder for its settings and log.</summary>
+    public const string AndroidDataDirectory = "/data/data/com.rimworldfps.client/files";
+
     [StructLayout(LayoutKind.Sequential)]
     private struct Rect
     {

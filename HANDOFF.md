@@ -10,7 +10,7 @@ tested and what has not, and what to do next.
 - Latest test build: `dist/` on that branch. **Every build carries this handoff and the whole
   source inside the mod folder** (`RimWorldFPS/HANDOFF.md`, `RimWorldFPS/Source/`, with the commit
   in `Source/COMMIT`), so the project can be picked up from the installed mod alone.
-- Android/RimDroid work is on its own branch, `rimdroid` (see Platforms).
+- Android/RimDroid work is on its own branch, **`android-client`** (see "Android app" below).
 
 ## What it is
 
@@ -187,12 +187,41 @@ would run a second, visible client.
   RimWorld's window and no Tab-to-RimWorld (those use Win32).
 - macOS: not packaged (raylib-cs has osx-x64/osx-arm64 natives; would need ad-hoc signing and
   `xattr -d com.apple.quarantine` at launch).
-- **RimDroid (Android)**: the mod's C# may load (RimDroid runs mods' code), but the client is a
-  separate desktop program and cannot run there; the indicator will say no client for this
-  platform. Android needs either an Android build of the client (a separate app talking to the game
-  over 127.0.0.1) or drawing the first-person view inside RimWorld itself with a Unity camera.
+- **RimDroid (Android)**: on branch `android-client`, the client is also built as an **Android app**
+  (see below). The owner chose this over drawing the view inside RimWorld. Desktop clients cannot
+  run on Android.
 - **Mobox (Wine + Box64 on Android)**: untested and unlikely; the mod would try to start the
   Windows client through Wine; a .NET 10 x64 program with OpenGL 3.3 under Box64/Wine may not run.
+
+## Android app (branch `android-client`)
+
+The same client sources (`client/src`) compiled for Android:
+
+- `client/android/RimFpsAndroid.csproj`: NativeAOT for `linux-bionic-arm64` into one shared library,
+  `libmain.so`, with raylib 6.0 (built for Android, OpenGL ES 3, static) linked in. `ANDROID` is
+  defined; `Platform.Native.Android` switches: touch controls, ES shaders (`Shaders.ForPlatform`
+  rewrites the `#version 330` header), the app's data folder (`/data/data/com.rimworldfps.client/files`
+  for client.json and client.log), Android fonts, weapon widget at the top.
+- `client/android/AndroidMain.cs`: exports `main`, which raylib's NativeActivity glue
+  (`ANativeActivity_onCreate`, exported via an IlcArg) calls; logs to logcat (tag RimWorldFPS) and
+  client.log. Linker needs `-Wl,--wrap=fopen` (raylib's asset loading) or it fails at load.
+- `client/android/AndroidManifest.xml`: `android.app.NativeActivity`, `lib_name` main, no Java code,
+  INTERNET permission (RimDroid connects over 127.0.0.1:47820), landscape, resizeable (split screen).
+- `client/android/build.sh`: builds raylib for Android once, publishes, strips, packs with aapt2,
+  zipaligns, signs with a debug key (`client/android/build/debug.keystore`, generated, not committed;
+  keep it to install updates over an older build), writes `dist/RimWorldFPS-Android.apk`. Needs the
+  Android NDK r27c and SDK build-tools 34 / platform 34 (`ANDROID_NDK_HOME`, `ANDROID_HOME`).
+- `client/src/UI/TouchControls.cs`: move stick (left 40% of the screen), drag to look, buttons
+  FIRE/AIM/JUMP/R/MELEE/USE/G/LOOT/MAP/MENU; Android's back key opens the menu. `--touch` shows
+  them on a computer for testing. Options has "Demo on next start" (Android) to try the app alone.
+- Mod side: `ClientLauncher.Android` (Unity says Android, or `/system/build.prop` exists). The app is
+  not opened at RimWorld start; the indicator's Start button and the FPS mode toggle open it with
+  an intent from Unity's current activity (`FLAG_ACTIVITY_LAUNCH_ADJACENT`, so it lands in the
+  other half of split screen), falling back to `/system/bin/am start`.
+- **Android pauses an app in the background**, so RimWorld must stay visible: play in split screen
+  (RimDroid in one half, the app in the other) or RimWorld freezes while the app is in front.
+- Verified here: the library links, exports `main` and `ANativeActivity_onCreate`, and needs only
+  symbols Android 8 (API 26) provides; the APK is signed and verified. **Never run on a device.**
 
 ## Next steps (suggested order)
 

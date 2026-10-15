@@ -23,6 +23,15 @@ namespace RimWorldFPS
         private static int restarts;
         private const int MaxRestarts = 5;
 
+        /// <summary>The Android app's package (client/android).</summary>
+        public const string AndroidPackage = "com.rimworldfps.client";
+
+        /// <summary>RimWorld runs on Android (RimDroid), natively or with its engine emulated
+        /// (when Unity may call itself Linux): the client is the RimWorld FPS app, opened rather
+        /// than started in the background.</summary>
+        public static readonly bool Android = Application.platform == RuntimePlatform.Android
+            || File.Exists("/system/build.prop") || Environment.GetEnvironmentVariable("ANDROID_ROOT") != null;
+
         /// <summary>The client's program for this computer, in the mod's folder; null when there is none.</summary>
         private static string Find(string root)
         {
@@ -93,6 +102,13 @@ namespace RimWorldFPS
         /// <summary>At RimWorld's start.</summary>
         public static void Start(string modRoot)
         {
+            if (Android)
+            {
+                // Not opened now: it would cover RimWorld as it starts. Turning on FPS mode, or
+                // the indicator's Start button, opens it.
+                Log.Message("[RimWorldFPS] Android: the client is the RimWorld FPS app; FPS mode or the Start button opens it");
+                return;
+            }
             try
             {
                 exe = Find(modRoot);
@@ -202,7 +218,7 @@ namespace RimWorldFPS
         {
             if (connected) return State.Online;
             if (Running) return State.Waiting;
-            if (Time.realtimeSinceStartup - startedAt < 15f && process != null && !HasExited(process)) return State.Starting;
+            if (Time.realtimeSinceStartup - startedAt < 15f && (Android || process != null && !HasExited(process))) return State.Starting;
             return State.Offline;
         }
 
@@ -221,13 +237,21 @@ namespace RimWorldFPS
                 ? "The FPS client is running; RimWorld is connecting to it."
                 : "The FPS client is running. It connects when a game loads.",
             State.Starting => "The FPS client is starting.",
-            _ => "Offline: the FPS client is not running." + (Problem != null ? "\nProblem: " + Problem : ""),
-        } + "\nClient: " + (exe ?? "none found") + "\nClient log: " + LogPath;
+            _ => (Android
+                    ? "Offline: the RimWorld FPS app is not open. Start opens it; use split screen so RimWorld keeps running."
+                    : "Offline: the FPS client is not running.")
+                + (Problem != null ? "\nProblem: " + Problem : ""),
+        } + (Android ? "\nClient: the RimWorld FPS app (" + AndroidPackage + ")" : "\nClient: " + (exe ?? "none found") + "\nClient log: " + LogPath);
 
         /// <summary>The force start button: whatever client runs is stopped (ours, or one left
         /// over, which may hold the port), and a fresh one started.</summary>
         public static void ForceStart()
         {
+            if (Android)
+            {
+                OpenAndroidApp();
+                return;
+            }
             Log.Message("[RimWorldFPS] force starting the FPS client");
             Stop();
             try
@@ -260,6 +284,64 @@ namespace RimWorldFPS
                 return;
             }
             Launch(force: true);
+        }
+
+        /// <summary>Android: opens the RimWorld FPS app beside RimWorld (in the other half of
+        /// split screen, if RimWorld is in one; else over it, and RimWorld pauses until it is back).</summary>
+        public static void OpenAndroidApp()
+        {
+            Log.Message("[RimWorldFPS] Android: opening the RimWorld FPS app");
+            Problem = null;
+            try
+            {
+                if (OpenWithIntent())
+                {
+                    // Opened, or found not installed (Problem says so).
+                    if (Problem == null) startedAt = Time.realtimeSinceStartup;
+                    return;
+                }
+            }
+            catch (Exception e)
+            {
+                Log.Warning("[RimWorldFPS] could not open the app through Android: " + e.Message);
+            }
+            try
+            {
+                // Without Unity's Android bridge (RimDroid with its engine emulated): Android's own tool.
+                using (Process am = Process.Start(new ProcessStartInfo("/system/bin/am",
+                    $"start --activity-launch-adjacent -n {AndroidPackage}/android.app.NativeActivity") { UseShellExecute = false, CreateNoWindow = true }))
+                    am?.WaitForExit(5000);
+                Problem = null;
+                startedAt = Time.realtimeSinceStartup;
+            }
+            catch (Exception e)
+            {
+                Problem = "could not open the RimWorld FPS app; open it yourself (split screen keeps RimWorld running): " + e.Message;
+                Log.Error("[RimWorldFPS] " + Problem);
+            }
+        }
+
+        /// <summary>Opens the app with an intent from RimWorld's own activity. False when the app
+        /// is not installed. Only called on Android.</summary>
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        private static bool OpenWithIntent()
+        {
+            using (var player = new AndroidJavaClass("com.unity3d.player.UnityPlayer"))
+            using (AndroidJavaObject activity = player.GetStatic<AndroidJavaObject>("currentActivity"))
+            using (AndroidJavaObject packages = activity.Call<AndroidJavaObject>("getPackageManager"))
+            using (AndroidJavaObject intent = packages.Call<AndroidJavaObject>("getLaunchIntentForPackage", AndroidPackage))
+            {
+                if (intent == null)
+                {
+                    Problem = "the RimWorld FPS app is not installed (Client/android/RimWorldFPS-Android.apk in the mod folder)";
+                    Log.Error("[RimWorldFPS] " + Problem);
+                    return true;
+                }
+                // FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_LAUNCH_ADJACENT: beside RimWorld in split screen.
+                intent.Call<AndroidJavaObject>("addFlags", 0x10000000 | 0x00001000).Dispose();
+                activity.Call("startActivity", intent);
+                return true;
+            }
         }
 
         /// <summary>The client's log, opened in the computer's text viewer.</summary>

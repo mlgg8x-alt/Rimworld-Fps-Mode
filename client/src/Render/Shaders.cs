@@ -8,6 +8,12 @@ namespace RimFps.Render;
 /// </summary>
 public static class Shaders
 {
+    /// <summary>A shader as this machine's OpenGL wants it: desktop GLSL 3.30 as written, or
+    /// OpenGL ES 3.00 on Android (the same code, with precision stated).</summary>
+    public static string ForPlatform(string source) => Platform.Native.Android
+        ? source.Replace("#version 330", "#version 300 es\nprecision highp float;\nprecision highp int;\nprecision highp sampler2D;")
+        : source;
+
     public const string WorldVertex = @"#version 330
 in vec3 vertexPosition;
 in vec2 vertexTexCoord;

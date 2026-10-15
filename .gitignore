@@ -29,3 +29,8 @@ logs/
 # FPS client build output
 client/bin/
 client/obj/
+
+# Android build output
+client/android/build/
+client/android/bin/
+client/android/obj/

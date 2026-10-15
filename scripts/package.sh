@@ -6,6 +6,7 @@
 #     1.6/Assemblies/RimWorldFPS.dll
 #     Client/win-x64/RimFpsClient.exe
 #     Client/linux-x64/RimFpsClient
+#     Client/android/RimWorldFPS-Android.apk   (when built with client/android/build.sh)
 #     HANDOFF.md            the project handoff, for picking the work up in any AI tool
 #     TESTING.md, README.md
 #     Source/               the whole repository at this commit (git archive, minus dist/)
@@ -32,6 +33,11 @@ rm -f "$mod/1.6/Assemblies/.gitkeep"
 cp "$out/publish-win-x64/RimFpsClient.exe" "$mod/Client/win-x64/"
 cp "$out/publish-linux-x64/RimFpsClient" "$mod/Client/linux-x64/"
 chmod +x "$mod/Client/linux-x64/RimFpsClient"
+# The Android app, when built (client/android/build.sh), for RimDroid players to install.
+if [ -f dist/RimWorldFPS-Android.apk ]; then
+  mkdir -p "$mod/Client/android"
+  cp dist/RimWorldFPS-Android.apk "$mod/Client/android/"
+fi
 cp HANDOFF.md TESTING.md README.md "$mod/"
 # The source as committed, plus any uncommitted changes to tracked files.
 git ls-files -z | grep -zv '^dist/' | xargs -0 -I{} cp --parents {} "$mod/Source/"

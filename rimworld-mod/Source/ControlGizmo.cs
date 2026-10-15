@@ -40,11 +40,13 @@ namespace RimWorldFPS
                     }
                     if (pawn.drafter != null && !pawn.Drafted) pawn.drafter.Drafted = true;
                     PlayerPawn.Control(pawn);
+                    // Android: the client is an app of its own; open it.
+                    if (ClientLauncher.Android && !BridgeGameComponent.Linked) ClientLauncher.OpenAndroidApp();
                 },
             };
             if (!controlled)
             {
-                if (!BridgeGameComponent.Linked) toggle.Disable("Start RimFpsClient.exe first: RimWorld connects to it by itself.");
+                if (!BridgeGameComponent.Linked && !ClientLauncher.Android) toggle.Disable("The FPS client is not connected: use the indicator's Start button in the top right corner.");
                 else if (pawn.Downed) toggle.Disable("Downed.");
                 else if (pawn.drafter == null || pawn.WorkTagIsDisabled(WorkTags.Violent)) toggle.Disable("Cannot be drafted.");
             }

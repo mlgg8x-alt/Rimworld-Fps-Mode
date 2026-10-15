@@ -14,6 +14,8 @@
     <ServerGarbageCollector>false</ServerGarbageCollector>
     <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
     <NoWarn>$(NoWarn);CA1416</NoWarn>
+    <!-- android/ is its own project (the Android app), built from these same sources. -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);android/**</DefaultItemExcludes>
   </PropertyGroup>
 
   <ItemGroup>

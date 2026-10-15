@@ -10,6 +10,20 @@
    indicator in the top right corner shows it (green online, yellow starting, red offline);
    its button force starts it. Hover it for details and the client log's path.
 
+## Android (RimDroid), branch `android-client`
+
+1. Install the app: `RimWorldFPS/Client/android/RimWorldFPS-Android.apk` (allow installing unknown
+   apps). It needs Android 8 or newer on a 64-bit ARM phone.
+2. Try the app alone first: open RimWorld FPS, MENU > Options > "Demo on next start: On", close
+   and reopen the app. You should see a made-up colony with the touch controls (stick on the
+   left, drag to look, FIRE/AIM/etc. on the right). Turn the demo off the same way.
+3. Install the mod in RimDroid (its mod manager takes the zip) and enable it below Harmony.
+4. Put RimDroid and RimWorld FPS **side by side in split screen** (Android pauses whichever app
+   is not visible). Load a save; the indicator's Start button (top right) or a colonist's
+   "FPS mode" toggle opens the app beside RimWorld. The indicator turns green when connected.
+5. If something fails: the indicator's hover text, RimDroid's log lines starting
+   `[RimWorldFPS]`, and the app's log (`adb logcat -s RimWorldFPS`).
+
 ## Controls
 
 WASD move, mouse look, Shift sprint, Space jump, Ctrl/C crouch, Alt walk.

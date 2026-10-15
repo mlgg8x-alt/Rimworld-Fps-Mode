@@ -27,6 +27,8 @@ public sealed class Launch
     /// when RimWorld (process <see cref="Parent"/>) is.</summary>
     public bool Background;
     public int Parent;
+    /// <summary>The phone's touch controls on a computer, for testing.</summary>
+    public bool Touch;
 }
 
 /// <summary>
@@ -53,6 +55,10 @@ public sealed class App : IDisposable
     private readonly Gun gun = new();
     private readonly Hands hands = new();
     private readonly WeaponEditor weaponEditor = new();
+    private readonly TouchControls touch = new();
+    /// <summary>Fingers play: the Android app, or <c>--touch</c> to try its controls on a computer.</summary>
+    private bool TouchMode => Native.Android || launch.Touch;
+    private bool touchLive;
     private readonly Projectiles projectiles = new();
     private readonly Effects effects = new();
     private readonly Scenery scenery = new();
@@ -180,7 +186,9 @@ public sealed class App : IDisposable
 
         // Input.
         bool focused = Raylib.IsWindowFocused() || launch.Screenshot != null;
-        if (Pressed(KeyboardKey.Escape))
+        if (TouchMode)
+            touch.Update(Raylib.GetScreenWidth(), Raylib.GetScreenHeight(), !(menu.Open || loot.Open || hud.Editing) && link.Connected);
+        if (Pressed(KeyboardKey.Escape) || TouchMode && (Pressed(KeyboardKey.Back) || touch.Pressed(TouchControls.Button.Menu)))
         {
             if (hud.Editing) StopEditing();
             else if (loot.Open) loot.Open = false;
@@ -200,21 +208,23 @@ public sealed class App : IDisposable
         bool frozen = menu.Open || loot.Open || hud.Editing;
         if (!frozen)
         {
-            if (Pressed(KeyboardKey.F) && link.Player != null) loot.Toggle();
-            if (Pressed(KeyboardKey.M)) automap.Open = !automap.Open;
+            if ((Pressed(KeyboardKey.F) || touch.Pressed(TouchControls.Button.Loot)) && link.Player != null) loot.Toggle();
+            if (Pressed(KeyboardKey.M) || touch.Pressed(TouchControls.Button.Map)) automap.Open = !automap.Open;
             if (Pressed(KeyboardKey.Tab)) TabToRimWorld();
-            if (Pressed(KeyboardKey.E) && link.Player is PawnState usePawn) Send(Out.Use(usePawn.Id));
+            if ((Pressed(KeyboardKey.E) || touch.Pressed(TouchControls.Button.Use)) && link.Player is PawnState usePawn) Send(Out.Use(usePawn.Id));
             if (Pressed(KeyboardKey.F3)) settings.ShowFps = !settings.ShowFps;
         }
         frozen = menu.Open || loot.Open || hud.Editing;
-        bool wantCapture = focused && !frozen && !hidden && link.Connected;
+        // A phone has no mouse to capture: its fingers play (TouchControls).
+        bool wantCapture = focused && !frozen && !hidden && link.Connected && !TouchMode;
         if (wantCapture != captured && launch.Screenshot == null)
         {
             captured = wantCapture;
             if (captured) Raylib.DisableCursor();
             else Raylib.EnableCursor();
         }
-        bool live = (captured || launch.Screenshot != null) && !frozen;
+        bool live = (captured || launch.Screenshot != null || TouchMode && link.Connected) && !frozen;
+        touchLive = live;
         Controls c = default;
         Vector2 look = Vector2.Zero;
         bool aiming = false, trigger = false, pulled = false;
@@ -231,14 +241,34 @@ public sealed class App : IDisposable
             c.Crouch = crouchKey;
             c.Sprint = Raylib.IsKeyDown(KeyboardKey.LeftShift);
             c.Walk = Raylib.IsKeyDown(KeyboardKey.LeftAlt);
-            if (settings.HoldToAim) aiming = Raylib.IsMouseButtonDown(MouseButton.Right);
+            if (TouchMode)
+            {
+                // Fingers, not the mouse: on a phone raylib makes every touch a left click.
+                look = touch.Look * (1080f / Math.Max(1, Raylib.GetScreenHeight())) * 2.2f;
+                c.LookX = look.X;
+                c.LookY = look.Y;
+                if (touch.Move != Vector2.Zero)
+                {
+                    c.Forward = touch.Move.Y;
+                    c.Right = touch.Move.X;
+                    c.Sprint = touch.Move.Length() > 0.95f;
+                }
+                c.Jump |= touch.Pressed(TouchControls.Button.Jump);
+                aiming = touch.Aiming;
+                trigger = touch.Fire;
+                pulled = touch.Pressed(TouchControls.Button.Fire);
+            }
             else
             {
-                if (Raylib.IsMouseButtonPressed(MouseButton.Right)) toggledAim = !toggledAim;
-                aiming = toggledAim;
+                if (settings.HoldToAim) aiming = Raylib.IsMouseButtonDown(MouseButton.Right);
+                else
+                {
+                    if (Raylib.IsMouseButtonPressed(MouseButton.Right)) toggledAim = !toggledAim;
+                    aiming = toggledAim;
+                }
+                trigger = Raylib.IsMouseButtonDown(MouseButton.Left);
+                pulled = Raylib.IsMouseButtonPressed(MouseButton.Left);
             }
-            trigger = Raylib.IsMouseButtonDown(MouseButton.Left);
-            pulled = Raylib.IsMouseButtonPressed(MouseButton.Left);
             if (launch.Aim) aiming = true;
             if (launch.Fire && frame > launch.Frames - 3) trigger = pulled = true;
             // Firing or aiming stops a sprint.
@@ -249,8 +279,10 @@ public sealed class App : IDisposable
         if (launch.Pitch.HasValue && frame <= 2) player.Pitch = launch.Pitch.Value;
         player.AimSlow = 1f / MathF.Max(1f, 1f + (gun.Zoom - 1f) * hands.Aim);
         player.Update(dt, c, link, grid, Send, settings, frozen);
-        bool bash = live && (Pressed(KeyboardKey.V) || launch.Swing && frame == launch.Frames - 8);
-        gun.Update(dt, trigger, pulled, live && Pressed(KeyboardKey.R), live && Pressed(KeyboardKey.G), bash, aiming,
+        bool bash = live && (Pressed(KeyboardKey.V) || touch.Pressed(TouchControls.Button.Melee) || launch.Swing && frame == launch.Frames - 8);
+        bool reload = live && (Pressed(KeyboardKey.R) || touch.Pressed(TouchControls.Button.Reload));
+        bool grenade = live && (Pressed(KeyboardKey.G) || touch.Pressed(TouchControls.Button.Grenade));
+        gun.Update(dt, trigger, pulled, reload, grenade, bash, aiming,
             link, player, figures, grid, Send, frozen);
         hands.Update(dt, player, gun, aiming, look);
         Sounds();
@@ -619,6 +651,7 @@ public sealed class App : IDisposable
         else if (!grid.Ready) Ui.Centred("Loading RimWorld's map...", ww / 2f, wh / 2f - Ui.S(20), Ui.S(26), Ui.Gold);
         else if (player.Flying && !hud.Editing)
             Ui.Centred("Spectating: select a colonist in RimWorld and turn on \"FPS mode\"", ww / 2f, wh - Ui.S(46), Ui.S(20), Ui.Grey);
+        if (TouchMode) touch.Draw(ww, wh, touchLive);
         loot.Draw(ww, wh, link, mouse, click && loot.Open, Send, hud);
         menu.Draw(ww, wh, mouse, click && menu.Open);
         if (settings.ShowFps)

@@ -102,6 +102,8 @@ public sealed class Settings
     public bool Bob { get; set; } = true;
     public bool ShowFps { get; set; }
     public bool HoldToAim { get; set; } = true;
+    /// <summary>Android app: start in the demo (a made-up colony, no RimWorld) next time.</summary>
+    public bool DemoOnStart { get; set; }
     public Dictionary<string, Widget> Hud { get; set; } = DefaultHud();
     /// <summary>How each weapon is held, by its RimWorld picture; <c>*gun</c> and <c>*melee</c>
     /// for every weapon without its own.</summary>
@@ -125,15 +127,17 @@ public sealed class Settings
     {
         ["minimap"] = new Widget { X = 0.012f, Y = 0.02f, Scale = 1f, Round = true, Zoom = 1f },
         ["status"] = new Widget { X = 0.012f, Y = 0.62f },
-        ["weapon"] = new Widget { X = 0.80f, Y = 0.83f },
+        // On a phone the bottom right is the fire and aim buttons: the weapon goes up top.
+        ["weapon"] = Platform.Native.Android ? new Widget { X = 0.6f, Y = 0.015f, Scale = 0.8f } : new Widget { X = 0.80f, Y = 0.83f },
         ["compass"] = new Widget { X = 0.35f, Y = 0.012f },
         ["messages"] = new Widget { X = 0.36f, Y = 0.1f },
         ["prompt"] = new Widget { X = 0.44f, Y = 0.6f },
     };
 
     [JsonIgnore]
-    public static string Path => System.IO.Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "RimWorldFPS", "client.json");
+    public static string Path => Platform.Native.Android
+        ? System.IO.Path.Combine(Platform.Native.AndroidDataDirectory, "client.json")
+        : System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "RimWorldFPS", "client.json");
 
     public static Settings Load()
     {
