@@ -89,3 +89,12 @@ All additive: the original IW4L side ignores fields and messages it does not kno
 | `weather` | RW → client | `sky`: RimWorld's sky glow, 0 night to 1 noon. The client darkens the open sky and outdoors by it |
 | `player_shot` | client → RW | `damage` is optional now: RimWorld deals the colonist's own bullet damage (and its extra damage) for a hit, rolled as RimWorld rolls it; `damage` is used only for a gun without a bullet |
 | `player_melee` | client → RW | The played colonist `pawn` attacks `target` in melee (fire with a melee weapon or bare hands, at the pawn in front). RimWorld makes the attack with the colonist's own melee verbs (hit chance, damage, body part, cooldown), only when `target` is in reach |
+
+### More fork messages
+
+| Line | Direction | Meaning |
+| --- | --- | --- |
+| `texture` `{i, png}` | RimWorld → client | Picture `i` of the `textures` names as a base64 PNG, read from the game's and mods' loaded textures. Sent before the `textures` line that names it; no files are written, and `textures`' `dir` is empty. |
+| `status` `{pawn, health, pain, bleeding, bleed_hours?, mood?, capacities, parts, conditions}` | RimWorld → client | The played colonist's health as the health tab reckons it, at most every half second when it changes. |
+| `health_card` `{pawn, w, h, png}` | RimWorld → client | The played colonist's Health tab as RimWorld (and any mod that changes it, such as Nice Health Tab) draws it, a base64 PNG, about once a second when it changes. |
+| `minimap` `{x?, y?, size?, shown, round, zoom?}` | client → RimWorld | Where the client's minimap widget is (client window pixels); on Windows RimWorld puts its own window there as the minimap. |

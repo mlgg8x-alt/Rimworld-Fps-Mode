@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
+using RimWorld;
 using UnityEngine;
 using Verse;
 
@@ -111,10 +112,10 @@ namespace RimWorldFPS
             Launch();
         }
 
-        private static void Launch()
+        private static void Launch(bool force = false)
         {
-            if (!BridgeMod.Settings.LaunchClient || exe == null) return;
-            if (PortInUse())
+            if (exe == null || !force && !BridgeMod.Settings.LaunchClient) return;
+            if (!force && PortInUse())
             {
                 Log.Message($"[RimWorldFPS] something already listens on port {BridgeMod.Settings.Port}: the FPS client is running");
                 Problem = null;
@@ -132,6 +133,7 @@ namespace RimWorldFPS
                 };
                 process = Process.Start(info);
                 runningAt = -10f;
+                startedAt = Time.realtimeSinceStartup;
                 Problem = null;
                 Log.Message($"[RimWorldFPS] started the FPS client in the background (process {process?.Id}); its log: {LogPath}");
             }
@@ -189,6 +191,82 @@ namespace RimWorldFPS
             nextCheck = 0;
             if (exe == null) Log.Error("[RimWorldFPS] " + (Problem ?? "no FPS client for this computer in the mod's Client folder"));
             else Launch();
+        }
+
+        /// <summary>How the client is, for the status indicator.</summary>
+        public enum State { Online, Waiting, Starting, Offline }
+
+        private static float startedAt = -100f;
+
+        public static State Now(bool connected)
+        {
+            if (connected) return State.Online;
+            if (Running) return State.Waiting;
+            if (Time.realtimeSinceStartup - startedAt < 15f && process != null && !HasExited(process)) return State.Starting;
+            return State.Offline;
+        }
+
+        public static string Label(State state) => state switch
+        {
+            State.Online => "FPS online",
+            State.Waiting => "FPS ready",
+            State.Starting => "FPS starting",
+            _ => "FPS offline",
+        };
+
+        public static string Describe(State state, bool inGame) => state switch
+        {
+            State.Online => "Online: connected to the FPS client. Select a colonist and turn on \"FPS mode\".",
+            State.Waiting => inGame
+                ? "The FPS client is running; RimWorld is connecting to it."
+                : "The FPS client is running. It connects when a game loads.",
+            State.Starting => "The FPS client is starting.",
+            _ => "Offline: the FPS client is not running." + (Problem != null ? "\nProblem: " + Problem : ""),
+        } + "\nClient: " + (exe ?? "none found") + "\nClient log: " + LogPath;
+
+        /// <summary>The force start button: whatever client runs is stopped (ours, or one left
+        /// over, which may hold the port), and a fresh one started.</summary>
+        public static void ForceStart()
+        {
+            Log.Message("[RimWorldFPS] force starting the FPS client");
+            Stop();
+            try
+            {
+                foreach (Process old in Process.GetProcessesByName("RimFpsClient"))
+                {
+                    try
+                    {
+                        old.Kill();
+                        old.WaitForExit(2000);
+                    }
+                    catch (Exception e)
+                    {
+                        Log.Warning($"[RimWorldFPS] could not stop an old FPS client (process {old.Id}): {e.Message}");
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                Log.Warning("[RimWorldFPS] could not look for old FPS clients: " + e.Message);
+            }
+            restarts = 0;
+            nextCheck = Time.realtimeSinceStartup + 5f;
+            runningAt = -10f;
+            Problem = null;
+            if (exe == null)
+            {
+                Problem = "no client for this computer in the mod's Client folder";
+                Log.Error("[RimWorldFPS] " + Problem);
+                return;
+            }
+            Launch(force: true);
+        }
+
+        /// <summary>The client's log, opened in the computer's text viewer.</summary>
+        public static void OpenLog()
+        {
+            if (File.Exists(LogPath)) Application.OpenURL("file://" + LogPath.Replace('\\', '/'));
+            else Messages.Message("RimWorld FPS: no client log yet (" + LogPath + ")", MessageTypeDefOf.RejectInput, false);
         }
 
         /// <summary>RimWorld is quitting: the client goes too.</summary>

@@ -6,9 +6,9 @@ using Verse;
 namespace RimWorldFPS
 {
     /// <summary>
-    /// A dot in the top right corner, in the menus and in a game: green while the FPS client is
-    /// online (running, and in a game connected), red while it is not. Its tooltip says which;
-    /// clicking it while red starts the client again.
+    /// The client's status in the top right corner, in the menus and in a game: a dot (green
+    /// online or ready, yellow starting, red offline), a word for it, details and the client's
+    /// log path on hover, and a button that force starts the client.
     /// </summary>
     [StaticConstructorOnStartup]
     internal static class StatusDot
@@ -16,6 +16,7 @@ namespace RimWorldFPS
         private static readonly Texture2D Dot = MakeDot(32);
         private static readonly Color Online = new Color(0.30f, 0.85f, 0.35f);
         private static readonly Color Offline = new Color(0.90f, 0.22f, 0.20f);
+        private static readonly Color Starting = new Color(0.95f, 0.75f, 0.2f);
 
         private static Texture2D MakeDot(int size)
         {
@@ -31,26 +32,39 @@ namespace RimWorldFPS
             return tex;
         }
 
+        /// <summary>The indicator in the top right corner: a dot and a word for the client's
+        /// state, and a button that force starts it.</summary>
         internal static void Draw(bool inGame)
         {
             ClientLauncher.Watch();
-            bool running = ClientLauncher.Running;
-            bool online = inGame ? BridgeGameComponent.Linked : running;
-            var rect = new Rect(UI.screenWidth - 22f, 6f, 14f, 14f);
+            ClientLauncher.State state = ClientLauncher.Now(inGame && BridgeGameComponent.Linked);
+            string label = ClientLauncher.Label(state);
+            GameFont font = Text.Font;
+            TextAnchor anchor = Text.Anchor;
             Color was = GUI.color;
+            Text.Font = GameFont.Tiny;
+            float labelWidth = Text.CalcSize(label).x, buttonWidth = 74f;
+            var box = new Rect(UI.screenWidth - (labelWidth + buttonWidth + 40f), 4f, labelWidth + buttonWidth + 36f, 22f);
+            Widgets.DrawBoxSolid(box, new Color(0.08f, 0.09f, 0.1f, 0.78f));
+            var dot = new Rect(box.x + 6f, box.y + 5f, 12f, 12f);
             GUI.color = new Color(0, 0, 0, 0.6f);
-            GUI.DrawTexture(rect.ExpandedBy(2f), Dot);
-            GUI.color = online ? Online : Offline;
-            GUI.DrawTexture(rect, Dot);
+            GUI.DrawTexture(dot.ExpandedBy(1.5f), Dot);
+            GUI.color = state == ClientLauncher.State.Online || state == ClientLauncher.State.Waiting ? Online
+                : state == ClientLauncher.State.Starting ? Starting : Offline;
+            GUI.DrawTexture(dot, Dot);
+            GUI.color = Color.white;
+            Text.Anchor = TextAnchor.MiddleLeft;
+            var text = new Rect(dot.xMax + 6f, box.y, labelWidth + 4f, box.height);
+            Widgets.Label(text, label);
+            TooltipHandler.TipRegion(new Rect(box.x, box.y, text.xMax - box.x, box.height), ClientLauncher.Describe(state, inGame));
+            var button = new Rect(box.xMax - buttonWidth - 3f, box.y + 2f, buttonWidth, box.height - 4f);
+            Text.Anchor = TextAnchor.MiddleCenter;
+            if (Widgets.ButtonText(button, state == ClientLauncher.State.Offline ? "Start" : "Restart"))
+                ClientLauncher.ForceStart();
+            TooltipHandler.TipRegion(button, "Force start the FPS client: stops any client that is running and starts a fresh one.");
+            Text.Font = font;
+            Text.Anchor = anchor;
             GUI.color = was;
-            string tip = online
-                ? (inGame ? "RimWorld FPS: online. Select a colonist and turn on \"FPS mode\"." : "RimWorld FPS: the client is running.")
-                : running ? "RimWorld FPS: the client is running but not connected yet (it connects when a game loads)."
-                : "RimWorld FPS: offline, the client is not running. Click to start it."
-                    + (ClientLauncher.Problem != null ? "\n\nProblem: " + ClientLauncher.Problem : "")
-                    + "\nClient log: " + ClientLauncher.LogPath;
-            TooltipHandler.TipRegion(rect.ExpandedBy(4f), tip);
-            if (!online && !running && Widgets.ButtonInvisible(rect.ExpandedBy(4f))) ClientLauncher.Restart();
         }
 
         [HarmonyPatch(typeof(UIRoot_Play), nameof(UIRoot_Play.UIRootOnGUI))]

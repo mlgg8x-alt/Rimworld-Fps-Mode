@@ -42,6 +42,13 @@ namespace RimWorldFPS
         {
             var list = new Listing_Standard();
             list.Begin(inRect);
+            bool inGame = Current.ProgramState == ProgramState.Playing;
+            ClientLauncher.State state = ClientLauncher.Now(inGame && BridgeGameComponent.Linked);
+            list.Label("Client status: " + ClientLauncher.Label(state));
+            list.Label(ClientLauncher.Describe(state, inGame));
+            if (list.ButtonText("Force start the FPS client")) ClientLauncher.ForceStart();
+            if (list.ButtonText("Open the client's log")) ClientLauncher.OpenLog();
+            list.GapLine();
             list.Label("FPS client address (RimWorld connects, the client listens)");
             Settings.Host = list.TextEntryLabeled("Host", Settings.Host);
             string port = Settings.Port.ToString();

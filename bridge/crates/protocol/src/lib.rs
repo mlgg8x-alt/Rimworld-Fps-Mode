@@ -140,6 +140,49 @@ pub enum Message {
     /// it: `names[i]` is `dir/names[i].png`, 128 pixels square. `skins` and `buildings` refer
     /// to them by index. Grows as new art is needed; sent whole when it does.
     Textures { dir: String, names: Vec<String> },
+    /// FPS fork: picture `i` of `textures`' names as a base64 PNG, read from the game's and
+    /// mods' loaded textures and sent before the `textures` line that names it, so no files
+    /// are written (`textures`' `dir` is then empty).
+    Texture { i: i32, png: String },
+    /// FPS fork: the played colonist's health, as RimWorld's health tab reckons it, sent at most
+    /// every half second when it changes. `capacities` by capacity def name; `parts` the six
+    /// limbs (`head`, `torso`, `left_arm`, ...); `conditions` every visible hediff.
+    Status {
+        pawn: String,
+        health: f32,
+        #[serde(default)]
+        pain: f32,
+        #[serde(default)]
+        bleeding: f32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bleed_hours: Option<f32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mood: Option<f32>,
+        #[serde(default)]
+        capacities: std::collections::BTreeMap<String, f32>,
+        #[serde(default)]
+        parts: Vec<PartHealth>,
+        #[serde(default)]
+        conditions: Vec<Condition>,
+    },
+    /// FPS fork: the played colonist's Health tab as RimWorld (and any mod that changes it)
+    /// draws it, `w` by `h` pixels, a base64 PNG; about once a second when it changes.
+    HealthCard { pawn: String, w: i32, h: i32, png: String },
+    /// FPS fork, client to RimWorld: where the minimap widget is, in the client's window
+    /// pixels, and how it looks; RimWorld places its own window there (Windows only).
+    Minimap {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        x: Option<f32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        y: Option<f32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        size: Option<f32>,
+        shown: bool,
+        #[serde(default)]
+        round: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        zoom: Option<f32>,
+    },
     /// The texture of every cell's wall, door or smoothed rock (`walls`) and of its built or
     /// smoothed floor (`floors`), one character a cell in the order of `terrain`'s cells: `.`
     /// for none, else the index into `textures` plus 48 (`0` is 0), past `~` too (M5+).
@@ -415,6 +458,25 @@ pub mod roof {
     pub const ROCK: u8 = b'r';
     /// RimWorld's overhead mountain: thick rock deep in a mountain.
     pub const THICK: u8 = b'R';
+}
+
+/// One limb's health in a `status` line.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PartHealth {
+    pub part: String,
+    pub health: f32,
+    #[serde(default)]
+    pub missing: bool,
+}
+
+/// One health condition in a `status` line, as the health tab lists it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Condition {
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub part: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub bleeding: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

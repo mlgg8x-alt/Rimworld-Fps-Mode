@@ -1,6 +1,55 @@
 <img width="2559" height="1439" alt="rimworld_thumb" src="https://github.com/user-attachments/assets/84606393-3be5-4eb6-b93c-924e8735cd58" />
 
-# RimWorld x MW2
+# RimWorld FPS Mode
+
+Play your RimWorld colonists in first person, with RimWorld's own art. A fork of
+[RimWorld x MW2](https://github.com/rkwitz/rimworld-mw2) by rkwitz that drops Call of Duty for
+its own first-person client.
+
+RimWorld stays the game: its map, pawns, health, AI, guns and items. The RimWorld mod reports
+what happens to the client over a local connection (127.0.0.1:47820), and the client draws it in
+3D. Where you walk, your colonist walks; when you shoot, they shoot in RimWorld.
+
+## Install (players)
+
+1. Install [Harmony](https://steamcommunity.com/sharedfiles/filedetails/?id=2009463077).
+2. Download the latest test build from [`dist/`](dist/) and unzip it into `RimWorld/Mods` so you
+   have `Mods/RimWorldFPS/About/About.xml`. Enable it below Harmony.
+3. Start RimWorld. The client comes with the mod (Windows and Linux) and starts by itself.
+   The indicator in the top right corner shows its state (green online, yellow starting, red
+   offline) and has a button to force start it; Mod settings > RimWorld FPS Mode has the same,
+   and opens the client's log.
+4. Load a save, select a colonist and turn on **FPS mode**.
+
+See [TESTING.md](TESTING.md) for controls and what to test.
+
+## What is in this repository
+
+| Folder | What |
+| --- | --- |
+| `rimworld-mod/` | The RimWorld mod (C#, Harmony): reports the game, takes the player's actions, starts the client. `About/` and `1.6/` are the mod; `Source/` its code. |
+| `client/` | The first-person client (C#, .NET 10, raylib via Raylib-cs): world, pawns, 2D weapons, HUD with edit mode. `--demo` runs it against a made-up colony. |
+| `protocol/` | The line protocol between them (`PROTOCOL.md`, `examples.ndjson`). |
+| `bridge/` | Rust types for the protocol, tested against the examples (`cargo test`). |
+| `dist/` | The latest test build. |
+
+## Build
+
+```
+dotnet build rimworld-mod/Source/RimWorldFPS.csproj -c Release   # the mod, into rimworld-mod/1.6/Assemblies
+dotnet run --project client -- --demo                            # the client, without RimWorld
+dotnet publish client -c Release -r win-x64 --self-contained -p:PublishSingleFile=true \
+  -p:IncludeNativeLibrariesForSelfExtract=true -p:PublishTrimmed=true -p:TrimMode=partial \
+  -p:JsonSerializerIsReflectionEnabledByDefault=true             # or -r linux-x64
+cd bridge && cargo test                                          # the protocol
+```
+
+The mod looks for the client in `RimWorldFPS/Client/win-x64/RimFpsClient.exe` or
+`RimWorldFPS/Client/linux-x64/RimFpsClient`.
+
+---
+
+# Upstream: RimWorld x MW2
 
 Play RimWorld fights in first person, in Call of Duty: Modern Warfare 2 (2009).
 

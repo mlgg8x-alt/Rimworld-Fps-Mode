@@ -2,15 +2,13 @@
 
 ## Install
 
-1. Install **Harmony** (Steam Workshop, or github.com/pardeike/HarmonyRimWorld).
-2. Copy the `RimWorldFPS` folder into `RimWorld/Mods/`, enable it in the mod list
-   **below Harmony**, and restart RimWorld. Disable the original "RimWorld MW2" mod if
-   you have it.
-3. Run `RimFpsClient.exe` (any folder). Leave it open; RimWorld connects to it by itself
-   on 127.0.0.1:47820 (either can start first).
-
-**UI sample:** `UI sample (demo).bat` runs the client alone against a made-up colony, straight
-into edit mode, so you can lay out the HUD and pose the weapons without RimWorld.
+1. Install **Harmony** (https://steamcommunity.com/sharedfiles/filedetails/?id=2009463077).
+2. Unzip the build into `RimWorld/Mods` so you have `Mods/RimWorldFPS/About/About.xml`, enable
+   it **below Harmony**, and restart RimWorld. Disable the original "RimWorld MW2" mod if you
+   have it.
+3. Nothing else: the client (Windows and Linux) comes with the mod and starts by itself. The
+   indicator in the top right corner shows it (green online, yellow starting, red offline);
+   its button force starts it. Hover it for details and the client log's path.
 
 ## Controls
 
@@ -21,7 +19,7 @@ F2 edit HUD, F3 FPS counter.
 
 ## What to test (tell me what breaks, with `Player.log` lines starting `[RimWorldFPS]`)
 
-1. **Connection**: load a save. The client window should say it's connected. RimWorld's log shows `[RimWorldFPS]` hello.
+1. **Connection**: the indicator is green ("FPS ready") on the main menu and green ("FPS online") once a save is loaded. If not, hover it, press Start/Restart, and send the hover text plus the client log.
 2. **Map**: walls, floors, doors, trees, furniture, lamps all show with your real textures. Note anything missing or invisible, and anything from mods.
 3. **FPS mode gizmo**: select any colonist; the **FPS mode** toggle drafts them and the client comes to the front playing them. Turning it off hands them back. RimWorld's own UI stays up in FPS mode for debugging (Mod settings > RimWorld FPS Mode to hide it).
 4. **Movement**: walk around; the colonist moves in RimWorld too. Walls and closed doors block you; E opens doors.
@@ -31,7 +29,7 @@ F2 edit HUD, F3 FPS counter.
 7. **Melee**: equip a knife, longsword, club, and a modded melee weapon. Left click swings (only hits when adjacent). V bashes with a gun.
 8. **Grenades**: G throws with frag grenades equipped.
 9. **Getting shot**: enemies' bullets hit you, and you can dodge them by moving.
-10. **Pawn status widget**: the colonist preview shows health, pain, mood, and injured body parts change colour when hit; conditions list updates (bleeding etc).
+10. **Health widget**: shows the colonist's real Health tab (select the colonist so their own tab, e.g. Nice Health Tab's, is used); it updates within a second when they are hurt.
 11. **Minimap**: the round RimWorld view in the corner follows you and matches the real map. Try Edit HUD (F2): move/resize the minimap and other widgets, toggle them, check they stay put after restart.
 12. **Loot (F)**: take a weapon off a corpse, drop one, wear apparel.
 13. **Tab**: back to RimWorld and return with the gizmo. Pausing RimWorld freezes you.
