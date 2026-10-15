@@ -1,0 +1,17 @@
+name: FPS client controls source check
+on:
+  push:
+    branches: [feature/fps-client-controls]
+  workflow_dispatch:
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check source patch
+        shell: bash
+        run: |
+          test -f patches/FpsClientControls.cs
+          grep -q 'Force Start Client' patches/FpsClientControls.cs
+          grep -q 'Restart Client' patches/FpsClientControls.cs
+          echo "Source patch present. This is NOT an integrated mod build."
