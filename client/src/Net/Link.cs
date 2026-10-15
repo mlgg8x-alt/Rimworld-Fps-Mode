@@ -105,10 +105,13 @@ public sealed class Link
             Seen[type] = Seen.TryGetValue(type, out int n) ? n + 1 : 1;
             Apply(type, e);
         }
-        catch (Exception ex) when (ex is JsonException or InvalidOperationException or FormatException)
+        catch (Exception ex)
         {
+            // Never fatal: a line this client cannot use (a newer RimWorld, odd data) is skipped.
             Errors++;
-            if (Errors < 20) Console.WriteLine($"[fps] could not read a line from RimWorld: {ex.Message}");
+            if (Errors < 20)
+                Console.WriteLine($"[fps] could not use a line from RimWorld ({ex.GetType().Name}: {ex.Message}): " +
+                    (line.Length > 160 ? line[..160] + "..." : line) + (Errors < 4 ? "\n" + ex.StackTrace : ""));
         }
     }
 

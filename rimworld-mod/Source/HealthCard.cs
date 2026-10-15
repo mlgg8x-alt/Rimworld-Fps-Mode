@@ -15,6 +15,7 @@ namespace RimWorldFPS
     /// which the tab draws. Drawn in pieces no bigger than RimWorld's window, which is small while
     /// it is the client's minimap and would cut the card off. Main thread, from the UI.
     /// </summary>
+    [StaticConstructorOnStartup]
     internal static class HealthCard
     {
         private const float Seconds = 1f;

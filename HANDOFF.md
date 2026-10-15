@@ -188,6 +188,21 @@ reference assemblies (Krafs.Rimworld.Ref 1.7.4979-alpha) target **.NET 10**, so 
 targets net10.0; it compiles with no errors but is **untested in 1.7** (it is an alpha; watch
 for runtime differences from Mono, and a Harmony build for 1.7).
 
+**First 1.7 test (1.7.4979 rev109):** 1.7 runs on a new engine, "Waylith", that stands in for
+Unity, with some Unity calls as stubs that do nothing. The log flags `Graphics.Blit` as one.
+`TextureExport` used Blit to read RimWorld's textures, and `HealthCard` and the minimap window
+trick (`RimView`) use RenderTexture/ReadPixels and Unity's window, which are likely stubs too.
+
+The client connected, then stopped right away, and RimWorld restarted it 5 times, so "FPS mode"
+stayed disabled. v10 changes:
+- The client skips any line it cannot use (`Link.Apply` catches everything and logs it).
+- Crashes go to `client.log`, and the previous run's log is kept as `client.previous.log`.
+- The parent-process check can no longer throw.
+- `TextureExport` reads readable textures straight from memory and refuses empty PNGs.
+
+Still to do on 1.7: read the client logs from a 1.7 run to confirm the cause. If textures come
+out blank there, read them another way: the mods' PNG files on disk, or Waylith's own API.
+
 ## Platforms
 
 **Windows only** (the owner's decision). The package ships only `Client/win-x64`. Linux and Android

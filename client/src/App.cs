@@ -82,6 +82,11 @@ public sealed class App : IDisposable
         {
             return false;
         }
+        catch (Exception)
+        {
+            // Not allowed to look (a RimWorld run with other rights): taken as still running.
+            return true;
+        }
     }
     private string? minimapSent;
     private int frame;

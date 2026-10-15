@@ -100,6 +100,7 @@ namespace RimWorldFPS
                 image.Apply();
                 byte[] png = image.EncodeToPNG();
                 UnityEngine.Object.Destroy(image);
+                if (png == null || png.Length == 0) throw new InvalidOperationException("this RimWorld could not save it as a picture");
                 index = Names.Count;
                 Names.Add(key);
                 Data.Add(png);
@@ -117,6 +118,19 @@ namespace RimWorldFPS
         /// RimWorld's textures are not readable.</summary>
         private static Color32[] Pixels(Texture texture, Vector2 scale, Vector2 offset, int size)
         {
+            // Read straight from memory when the texture allows it (RimWorld 1.7's engine, whose
+            // Graphics.Blit does nothing, may keep them readable).
+            if (texture is Texture2D readable && readable.isReadable)
+            {
+                var direct = new Color32[size * size];
+                for (int y = 0; y < size; y++)
+                    for (int x = 0; x < size; x++)
+                    {
+                        Color c = readable.GetPixelBilinear(offset.x + scale.x * (x + 0.5f) / size, offset.y + scale.y * (y + 0.5f) / size);
+                        direct[y * size + x] = c;
+                    }
+                return direct;
+            }
             RenderTexture rt = RenderTexture.GetTemporary(size, size, 0, RenderTextureFormat.ARGB32);
             RenderTexture previous = RenderTexture.active;
             Graphics.Blit(texture, rt, scale, offset);
@@ -153,6 +167,7 @@ namespace RimWorldFPS
                 image.Apply();
                 byte[] png = image.EncodeToPNG();
                 UnityEngine.Object.Destroy(image);
+                if (png == null || png.Length == 0) throw new InvalidOperationException("this RimWorld could not save it as a picture");
                 index = Names.Count;
                 Names.Add(key);
                 Data.Add(png);

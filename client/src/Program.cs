@@ -82,6 +82,9 @@ For testing (with --demo): --screenshot file.png [--frames N] [--yaw D] [--pitch
             {
                 string log = Path.Combine(Path.GetDirectoryName(Settings.Path)!, "client.log");
                 Directory.CreateDirectory(Path.GetDirectoryName(log)!);
+                // The last run's log is kept: when RimWorld restarts a client that stopped, the
+                // reason it stopped is in there.
+                if (File.Exists(log)) File.Copy(log, Path.ChangeExtension(log, ".previous.log"), true);
                 var writer = new StreamWriter(log, false) { AutoFlush = true };
                 Console.SetOut(writer);
                 Console.SetError(writer);
@@ -98,8 +101,18 @@ For testing (with --demo): --screenshot file.png [--frames N] [--yaw D] [--pitch
             settings = new Settings { Weapons = settings.Weapons, Scratch = true };
             settings.Clamp();
         }
-        using var app = new App(settings, launch);
-        app.Run();
+        AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+            Console.WriteLine($"[fps] crashed: {e.ExceptionObject}");
+        try
+        {
+            using var app = new App(settings, launch);
+            app.Run();
+        }
+        catch (Exception e)
+        {
+            Console.WriteLine($"[fps] crashed: {e}");
+            return 1;
+        }
         return 0;
     }
 }
