@@ -195,6 +195,65 @@ remains on branch `android-client` for reference only.
 - The mod redraws the Health tab picture (a GPU read-back) only when the colonist's health report
   changed, or every 8 seconds, instead of every second.
 
+## Agreed next architecture (owner's decisions, latest)
+
+Goal: the FPS view is drawn **inside RimWorld's own window** (no second window, no tab
+switching), and a **separate headless backend process** takes the heavy work off RimWorld (RAM,
+CPU), so RimWorld stays fast and loads stay short. Windows only. Hardware: ASUS ROG Flow Z13
+(integrated AMD GPU with unified memory: "VRAM" is carved out of system RAM; recommend 8-12 GB, not
+32, since RimWorld and mods need the RAM; 16 CPU cores, RimWorld uses about one).
+
+- **Backend** (`backend/`, C#, headless, local): map processing into 3D chunk meshes, map caches,
+  and later collision/movement, bullets, line of sight, weapon analysis, GPU compute (DirectX
+  compute shaders; no CUDA on AMD) for whole-map lighting/visibility/fog if worth it. Low priority
+  on idle cores. Starts with RimWorld (mod launches it), exits with it (`--parent`). A crash must
+  not affect RimWorld (mod falls back to the normal view).
+- **Mod**: draws with Unity in RimWorld (mesh chunks uploaded once to the GPU, then the CPU copy
+  dropped: `Mesh.UploadMeshData(true)`), uses RimWorld's already-loaded textures directly (the
+  PNG export goes away), instanced drawing for repeated things, culling. The Health tab is drawn
+  natively (the capture trick goes away). The minimap becomes RimWorld's own camera drawn into a
+  corner (the window juggling goes away). Mouse locked in FPS mode, returned to the UI on exit.
+  Keep per-frame work and allocations tiny (RimWorld's old Mono GC stutters on garbage).
+- **Transport**: small binary frames on TCP 127.0.0.1:47821 for control; big data (cells, meshes)
+  in a shared memory arena (`Local\RimWorldFPS.Arena`) read in place. No JSON.
+- **Instant FPS mode**: the backend builds the map in the background while the player plays
+  normally; if FPS mode is entered early, chunks around the colonist come first (progressive
+  streaming, brief edge pop-in, no loading screen). Only changed chunks rebuild.
+- **Caching**: the **home map is always cached** on disk (instant reload); caravan/quest maps
+  keep only the last few and get a **short boot-up time** when new (owner accepted).
+- **Deferred weapon assets**: nothing weapon-related during RimWorld's load (mods' defs, patches
+  and textures are not final until it finishes). After a save loads, a low-priority queue
+  analyzes weapons a few per frame: first the played colonist's weapon, then weapons on the map,
+  then the rest; results cached by texture and mod version; a default pose until ready.
+- Optional later: baked lighting, higher-detail geometry, distant LOD; DirectX shared GPU
+  resources (needs a small native DLL) only if shared memory is not fast enough.
+
+### Status of that plan
+
+Done (`backend/`, builds; `dotnet run -- --selftest` passes):
+- `Protocol.cs`: binary frames and message types (Hello, MapBegin, MapCells, CellsChanged,
+  ChunkReady, MapReady, Ping), the 8-byte `Cell`.
+- `Arena.cs`: named shared memory with a bump allocator (file-backed off Windows, for tests).
+- `Mesher.cs`: 16x16-cell chunk meshes on all cores (floors, wall faces only where they meet open
+  ground, ceilings under roofs), and which chunks a changed cell touches.
+- `MapCache.cs`: per save/map/mod-list cache on disk; home map always kept, others last 3.
+- `Program.cs`: the server loop (MapBegin -> cache hit sends chunks at once; MapCells -> cache,
+  build, send), `--parent`, `--selftest`. Self-test: 250x250 map, 256 chunks, 460k vertices built
+  in ~90 ms, cache save/load ~1.5 ms each, ~24 ms into shared memory.
+
+To do, in order:
+1. Mod: pack cells (from `Map.edificeGrid`, terrain, roofs) into the arena, send MapBegin/MapCells,
+   CellsChanged on map changes; launch the backend like the client (ClientLauncher).
+2. Mod: in-game view: a Unity camera at the colonist's eyes, chunk meshes from the arena drawn with
+   RimWorld's materials (texture table: index -> material), pawns/things as upright billboards
+   (their own materials/PortraitsCache), the 2D weapon and hands on the IMGUI layer, HUD widgets,
+   native Health tab, minimap from RimWorld's camera. Reuse the mod's existing actions
+   (PlayerPawn.Move, PlayerShots.Fired, PlayerMelee.Strike, Activate.Use, Throws.Throw).
+3. Move movement/collision/ballistics from `client/src/Game` into the backend.
+4. Deferred weapon analysis queue (port `client/src/Game/WeaponModel.cs`'s grip/axis logic).
+5. Progressive streaming order (chunks nearest the colonist first), background prebuild.
+6. Retire the separate client window once the in-game view covers it.
+
 ## Next steps (suggested order)
 
 1. Get the owner's logs from a real run of v5 and fix what they show (auto-start, connection).

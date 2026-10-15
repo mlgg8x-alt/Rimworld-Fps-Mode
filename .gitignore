@@ -29,3 +29,7 @@ logs/
 # FPS client build output
 client/bin/
 client/obj/
+
+# Backend build output
+backend/bin/
+backend/obj/
