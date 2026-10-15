@@ -180,6 +180,14 @@ features compiled in (`ClientLauncher.ForceStart`, `StatusDot`, settings page). 
 `FpsClientControls.cs`; it starts the client without `--background`/`--parent`/`--address` and
 would run a second, visible client.
 
+## RimWorld versions
+
+The mod builds for **1.6 and 1.7** from the same source (`-p:RimWorldVersion=1.6|1.7`; the
+package carries `1.6/Assemblies` and `1.7/Assemblies`, About.xml lists both). RimWorld 1.7's
+reference assemblies (Krafs.Rimworld.Ref 1.7.4979-alpha) target **.NET 10**, so the 1.7 build
+targets net10.0; it compiles with no errors but is **untested in 1.7** (it is an alpha; watch
+for runtime differences from Mono, and a Harmony build for 1.7).
+
 ## Platforms
 
 **Windows only** (the owner's decision). The package ships only `Client/win-x64`. Linux and Android

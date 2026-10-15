@@ -4,6 +4,8 @@
 # Build output
 rimworld-mod/1.6/Assemblies/*
 !rimworld-mod/1.6/Assemblies/.gitkeep
+rimworld-mod/1.7/Assemblies/*
+!rimworld-mod/1.7/Assemblies/.gitkeep
 rimworld-mod/Source/obj/
 rimworld-mod/Source/bin/
 bridge/target/

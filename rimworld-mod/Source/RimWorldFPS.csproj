@@ -1,11 +1,18 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net472</TargetFramework>
+    <!-- One build per RimWorld version: -p:RimWorldVersion=1.7 builds into ../1.7/Assemblies. -->
+    <RimWorldVersion Condition="'$(RimWorldVersion)' == ''">1.6</RimWorldVersion>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <!-- RimWorld 1.6 runs on .NET Framework 4.7.2 (Mono); 1.7's references target .NET 10. -->
+    <TargetFramework Condition="'$(RimWorldVersion)' != '1.7'">net472</TargetFramework>
+    <TargetFramework Condition="'$(RimWorldVersion)' == '1.7'">net10.0</TargetFramework>
     <LangVersion>latest</LangVersion>
     <RootNamespace>RimWorldFPS</RootNamespace>
     <AssemblyName>RimWorldFPS</AssemblyName>
-    <OutputPath>../1.6/Assemblies/</OutputPath>
+    <OutputPath>../$(RimWorldVersion)/Assemblies/</OutputPath>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <AppendRuntimeIdentifierToOutputPath>false</AppendRuntimeIdentifierToOutputPath>
     <DebugType>none</DebugType>
@@ -16,7 +23,8 @@
   <ItemGroup>
     <!-- Reference-only RimWorld and Unity assemblies, so the mod builds without a game install.
          Versions are pinned in versions.json; keep the two in step. -->
-    <PackageReference Include="Krafs.Rimworld.Ref" Version="1.6.4871" />
+    <PackageReference Include="Krafs.Rimworld.Ref" Version="1.6.4871" Condition="'$(RimWorldVersion)' == '1.6'" />
+    <PackageReference Include="Krafs.Rimworld.Ref" Version="1.7.4979-alpha" Condition="'$(RimWorldVersion)' == '1.7'" />
     <!-- Harmony ships as its own RimWorld mod, so never copy its DLL into ours. -->
     <PackageReference Include="Lib.Harmony" Version="2.4.2" ExcludeAssets="runtime" />
   </ItemGroup>

@@ -3,7 +3,8 @@
 #
 #   RimWorldFPS/
 #     About/About.xml
-#     1.6/Assemblies/RimWorldFPS.dll
+#     1.6/Assemblies/RimWorldFPS.dll    (RimWorld 1.6)
+#     1.7/Assemblies/RimWorldFPS.dll    (RimWorld 1.7, .NET 10)
 #     Client/win-x64/RimFpsClient.exe
 #     HANDOFF.md            the project handoff, for picking the work up in any AI tool
 #     TESTING.md, README.md
@@ -20,13 +21,17 @@ publish=(-c Release --self-contained -p:PublishSingleFile=true -p:IncludeNativeL
   -p:PublishTrimmed=true -p:TrimMode=partial -p:JsonSerializerIsReflectionEnabledByDefault=true
   -p:EnableCompressionInSingleFile=true -p:PublishReadyToRun=true)
 
-dotnet build rimworld-mod/Source/RimWorldFPS.csproj -c Release
+# The mod for each RimWorld version: 1.6 (.NET Framework 4.7.2) and 1.7 (.NET 10), each into its
+# own folder, which RimWorld picks by version.
+for v in 1.6 1.7; do
+  dotnet build rimworld-mod/Source/RimWorldFPS.csproj -c Release -p:RimWorldVersion=$v -p:BaseIntermediateOutputPath=obj/$v/
+done
 # Windows only. ReadyToRun: precompiled, so play starts without the JIT's stutter.
 dotnet publish client/RimFpsClient.csproj -r win-x64 "${publish[@]}" -o "$out/publish-win-x64"
 
 mkdir -p "$mod/Client/win-x64" "$mod/Source"
-cp -r rimworld-mod/About rimworld-mod/1.6 "$mod/"
-rm -f "$mod/1.6/Assemblies/.gitkeep"
+cp -r rimworld-mod/About rimworld-mod/1.6 rimworld-mod/1.7 "$mod/"
+rm -f "$mod/1.6/Assemblies/.gitkeep" "$mod/1.7/Assemblies/.gitkeep"
 cp "$out/publish-win-x64/RimFpsClient.exe" "$mod/Client/win-x64/"
 cp HANDOFF.md TESTING.md README.md "$mod/"
 # The source as committed, plus any uncommitted changes to tracked files.
