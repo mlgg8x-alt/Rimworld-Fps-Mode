@@ -1,0 +1,23 @@
+name: Build RimWorld FPS mod
+on:
+  push:
+    branches:
+      - codex/force-start-status-build
+permissions:
+  contents: read
+jobs:
+  build-mod:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: Build RimWorld mod
+        run: dotnet build rimworld-mod/Source/RimWorldFPS.csproj --configuration Release
+      - name: Upload compiled DLL
+        uses: actions/upload-artifact@v4
+        with:
+          name: RimWorldFPS-compiled-dll
+          path: rimworld-mod/1.6/Assemblies/RimWorldFPS.dll
+          if-no-files-found: error
