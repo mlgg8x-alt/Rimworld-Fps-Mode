@@ -67,6 +67,9 @@ public sealed class App : IDisposable
     private bool told, hidden, captured, fullscreen, menuTold, toggledAim;
     private float rimworldGone, sinceMinimap, parentCheck;
     private bool started;
+    private int targetFps = -1;
+    private readonly System.Diagnostics.Stopwatch clock = System.Diagnostics.Stopwatch.StartNew();
+    private double lastFrameAt;
 
     private static bool Alive(int pid)
     {
@@ -156,7 +159,11 @@ public sealed class App : IDisposable
     private void Frame()
     {
         frame++;
-        float dt = Math.Clamp(Raylib.GetFrameTime(), 0.001f, 0.05f);
+        // Real time between frames: raylib's frame time stands still while hidden (no frames drawn).
+        double now = clock.Elapsed.TotalSeconds;
+        float realDt = (float)Math.Min(now - lastFrameAt, 1.0);
+        lastFrameAt = now;
+        float dt = Math.Clamp(realDt, 0.001f, 0.05f);
         if (launch.Screenshot != null) dt = 1f / 60f;
         Ui.Begin(Raylib.GetScreenHeight());
         Network();
@@ -176,7 +183,7 @@ public sealed class App : IDisposable
         }
         pictures.Pump(4.0);
         atlas.Refresh(dt);
-        Windows(dt);
+        Windows(realDt);
 
         // Input.
         bool focused = Raylib.IsWindowFocused() || launch.Screenshot != null;
@@ -301,6 +308,22 @@ public sealed class App : IDisposable
         hud.Update(dt, link);
         if (hud.Editing && !weaponEditor.Captured) hud.Edit(Raylib.GetScreenWidth(), Raylib.GetScreenHeight());
         Prompt();
+        // Hidden (RimWorld is being played, not the client): keep up with RimWorld but draw
+        // nothing and tick slowly, so the GPU and CPU go to RimWorld.
+        int fps = launch.Screenshot != null ? 0 : 165;
+        if (fps != targetFps)
+        {
+            targetFps = fps;
+            Raylib.SetTargetFPS(fps);
+        }
+        if (hidden)
+        {
+            // No frame at all: just the window's events, then sleep (EndDrawing would present
+            // an empty frame and still cost the GPU).
+            Raylib.PollInputEvents();
+            Thread.Sleep(1000 / 15);
+            return;
+        }
         Draw(dt);
     }
 

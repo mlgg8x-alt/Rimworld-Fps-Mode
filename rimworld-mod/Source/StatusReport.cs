@@ -23,6 +23,9 @@ namespace RimWorldFPS
 
         private static string sent;
         private static float at = -10f;
+        /// <summary>Counts health reports that differed from the one before: the health tab is
+        /// drawn again only when it moves.</summary>
+        public static int Revision;
 
         public static void Reset()
         {
@@ -53,6 +56,7 @@ namespace RimWorldFPS
             }
             if (line == sent) return null;
             sent = line;
+            Revision++;
             return line;
         }
 

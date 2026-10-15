@@ -15,7 +15,7 @@ what happens to the client over a local connection (127.0.0.1:47820), and the cl
 1. Install [Harmony](https://steamcommunity.com/sharedfiles/filedetails/?id=2009463077).
 2. Download the latest test build from [`dist/`](dist/) and unzip it into `RimWorld/Mods` so you
    have `Mods/RimWorldFPS/About/About.xml`. Enable it below Harmony.
-3. Start RimWorld. The client comes with the mod (Windows and Linux) and starts by itself.
+3. Start RimWorld (Windows only). The client comes with the mod and starts by itself.
    The indicator in the top right corner shows its state (green online, yellow starting, red
    offline) and has a button to force start it; Mod settings > RimWorld FPS Mode has the same,
    and opens the client's log.
@@ -38,14 +38,11 @@ See [TESTING.md](TESTING.md) for controls and what to test.
 ```
 dotnet build rimworld-mod/Source/RimWorldFPS.csproj -c Release   # the mod, into rimworld-mod/1.6/Assemblies
 dotnet run --project client -- --demo                            # the client, without RimWorld
-dotnet publish client -c Release -r win-x64 --self-contained -p:PublishSingleFile=true \
-  -p:IncludeNativeLibrariesForSelfExtract=true -p:PublishTrimmed=true -p:TrimMode=partial \
-  -p:JsonSerializerIsReflectionEnabledByDefault=true             # or -r linux-x64
+scripts/package.sh RimWorldFPS                                   # mod + Windows client + handoff + source -> dist/
 cd bridge && cargo test                                          # the protocol
 ```
 
-The mod looks for the client in `RimWorldFPS/Client/win-x64/RimFpsClient.exe` or
-`RimWorldFPS/Client/linux-x64/RimFpsClient`.
+Windows only. The mod looks for the client in `RimWorldFPS/Client/win-x64/RimFpsClient.exe`.
 
 ---
 

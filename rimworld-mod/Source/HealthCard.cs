@@ -18,7 +18,12 @@ namespace RimWorldFPS
     internal static class HealthCard
     {
         private const float Seconds = 1f;
-        private static float due;
+        /// <summary>Drawn again at least this often, for what the tab shows beyond the health
+        /// report (a mod's extras), else only when the health report changed.</summary>
+        private const float Anyway = 8f;
+        private static float due, drawnAt = -100f;
+        private static int drawnRevision = -1;
+        private static Pawn drawnPawn;
         private static int sentHash;
         private static string pending;
         private static Texture2D image;
@@ -27,6 +32,8 @@ namespace RimWorldFPS
 
         public static void Reset()
         {
+            drawnPawn = null;
+            drawnRevision = -1;
             sentHash = 0;
             pending = null;
             due = 0;
@@ -49,6 +56,11 @@ namespace RimWorldFPS
             Map map = Find.CurrentMap;
             Pawn pawn = map != null ? PlayerPawn.Current(map) : null;
             if (pawn == null) return;
+            // Reading the picture back stalls the GPU: only when something changed.
+            if (pawn == drawnPawn && StatusReport.Revision == drawnRevision && Time.realtimeSinceStartup - drawnAt < Anyway) return;
+            drawnPawn = pawn;
+            drawnRevision = StatusReport.Revision;
+            drawnAt = Time.realtimeSinceStartup;
             try
             {
                 Draw(pawn);

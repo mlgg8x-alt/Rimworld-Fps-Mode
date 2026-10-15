@@ -6,7 +6,7 @@
 2. Unzip the build into `RimWorld/Mods` so you have `Mods/RimWorldFPS/About/About.xml`, enable
    it **below Harmony**, and restart RimWorld. Disable the original "RimWorld MW2" mod if you
    have it.
-3. Nothing else: the client (Windows and Linux) comes with the mod and starts by itself. The
+3. Nothing else (Windows only): the client comes with the mod and starts by itself. The
    indicator in the top right corner shows it (green online, yellow starting, red offline);
    its button force starts it. Hover it for details and the client log's path.
 

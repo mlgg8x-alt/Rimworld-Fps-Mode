@@ -27,11 +27,10 @@ namespace RimWorldFPS
         private static string Find(string root)
         {
             string dir = Path.Combine(root, "Client");
+            // Windows only.
             string[] candidates = Application.platform == RuntimePlatform.WindowsPlayer || Application.platform == RuntimePlatform.WindowsEditor
                 ? new[] { Path.Combine(dir, "win-x64", "RimFpsClient.exe"), Path.Combine(dir, "RimFpsClient.exe") }
-                : Application.platform == RuntimePlatform.LinuxPlayer
-                    ? new[] { Path.Combine(dir, "linux-x64", "RimFpsClient") }
-                    : new string[0];
+                : new string[0];
             foreach (string path in candidates)
                 if (File.Exists(path)) return path;
             return null;
@@ -104,7 +103,9 @@ namespace RimWorldFPS
             }
             if (exe == null)
             {
-                Problem = Problem ?? $"no client for {Application.platform} in {Path.Combine(modRoot, "Client")}";
+                Problem = Problem ?? (Application.platform == RuntimePlatform.WindowsPlayer
+                    ? $"no client in {Path.Combine(modRoot, "Client", "win-x64")}"
+                    : "RimWorld FPS Mode runs on Windows only");
                 Log.Error("[RimWorldFPS] " + Problem);
                 return;
             }
@@ -121,7 +122,6 @@ namespace RimWorldFPS
                 Problem = null;
                 return;
             }
-            if (Application.platform != RuntimePlatform.WindowsPlayer) MakeRunnable(exe);
             try
             {
                 int self = Process.GetCurrentProcess().Id;
@@ -148,25 +148,6 @@ namespace RimWorldFPS
         /// <summary>Where the client writes its log (it starts it fresh each run).</summary>
         public static string LogPath => Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "RimWorldFPS", "client.log");
-
-        /// <summary>Linux and macOS: the program marked runnable (unzipping often drops that).</summary>
-        private static void MakeRunnable(string path)
-        {
-            foreach (string chmod in new[] { "/bin/chmod", "/usr/bin/chmod", "chmod" })
-            {
-                try
-                {
-                    if (chmod.StartsWith("/") && !File.Exists(chmod)) continue;
-                    using (Process p = Process.Start(new ProcessStartInfo(chmod, $"+x \"{path}\"") { UseShellExecute = false, CreateNoWindow = true }))
-                        p?.WaitForExit(3000);
-                    return;
-                }
-                catch (Exception e)
-                {
-                    Log.Warning($"[RimWorldFPS] could not mark the client runnable with {chmod}: {e.Message}");
-                }
-            }
-        }
 
         /// <summary>Every frame: started again if it stopped (a few times at most).</summary>
         public static void Watch()

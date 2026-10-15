@@ -7,10 +7,10 @@ tested and what has not, and what to do next.
 - Repository: https://github.com/mlgg8x-alt/Rimworld-Fps-Mode
 - Working branch (all current code): `ccr-6e26a519-k6f9ln`. The default branch still holds the
   original upstream project.
-- Latest test build: `dist/` on that branch. **Every build carries this handoff and the whole
+- Latest test build: `dist/` on that branch (Windows only). **Every build carries this handoff and the whole
   source inside the mod folder** (`RimWorldFPS/HANDOFF.md`, `RimWorldFPS/Source/`, with the commit
   in `Source/COMMIT`), so the project can be picked up from the installed mod alone.
-- Android/RimDroid work is on its own branch, `rimdroid` (see Platforms).
+- Android work (dropped) is on branch `android-client`, for reference only.
 
 ## What it is
 
@@ -182,17 +182,18 @@ would run a second, visible client.
 
 ## Platforms
 
-- Windows RimWorld: supported (client `win-x64`).
-- Linux RimWorld (incl. Steam Deck desktop): supported (client `linux-x64`); no minimap overlay of
-  RimWorld's window and no Tab-to-RimWorld (those use Win32).
-- macOS: not packaged (raylib-cs has osx-x64/osx-arm64 natives; would need ad-hoc signing and
-  `xattr -d com.apple.quarantine` at launch).
-- **RimDroid (Android)**: the mod's C# may load (RimDroid runs mods' code), but the client is a
-  separate desktop program and cannot run there; the indicator will say no client for this
-  platform. Android needs either an Android build of the client (a separate app talking to the game
-  over 127.0.0.1) or drawing the first-person view inside RimWorld itself with a Unity camera.
-- **Mobox (Wine + Box64 on Android)**: untested and unlikely; the mod would try to start the
-  Windows client through Wine; a .NET 10 x64 program with OpenGL 3.3 under Box64/Wine may not run.
+**Windows only** (the owner's decision). The package ships only `Client/win-x64`. Linux and Android
+were tried and dropped: an Android app build (NativeAOT + raylib for Android, touch controls)
+remains on branch `android-client` for reference only.
+
+## Performance notes
+
+- While no colonist is played the client is hidden and draws nothing: it polls window events
+  and sleeps (about 2% of a core here, from about 49% with empty frames, and full 3D frames at up
+  to 165 fps before). Its clock is real time, so it still notices RimWorld closing.
+- The client is published ReadyToRun (precompiled), so play starts without JIT stutter.
+- The mod redraws the Health tab picture (a GPU read-back) only when the colonist's health report
+  changed, or every 8 seconds, instead of every second.
 
 ## Next steps (suggested order)
 
