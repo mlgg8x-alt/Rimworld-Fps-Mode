@@ -72,8 +72,9 @@ For testing (with --demo): --screenshot file.png [--frames N] [--yaw D] [--pitch
         }
         if (launch.Screenshot != null)
         {
-            // A test shot: the same look every time, whatever the saved settings say.
-            settings = new Settings();
+            // A test shot: the same look every time, whatever the saved settings say, but with
+            // the saved weapon poses; and nothing saved after.
+            settings = new Settings { Weapons = settings.Weapons, Scratch = true };
             settings.Clamp();
         }
         using var app = new App(settings, launch);

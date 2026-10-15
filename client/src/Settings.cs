@@ -114,6 +114,8 @@ public sealed class Settings
         : melee ? WeaponPose.Melee() : WeaponPose.Gun();
 
     [JsonIgnore] public bool Retro => Style == "retro";
+    /// <summary>A test run's settings: never saved over the player's.</summary>
+    [JsonIgnore] public bool Scratch { get; init; }
     /// <summary>Pixels a RimWorld picture keeps on its long side (RimWorld saves 128).</summary>
     [JsonIgnore] public int PictureTexels => Retro ? 64 : 128;
     /// <summary>Pixels a cell of RimWorld's ground keeps across (RimWorld's own are 32).</summary>
@@ -152,6 +154,7 @@ public sealed class Settings
 
     public void Save()
     {
+        if (Scratch) return;
         try
         {
             Directory.CreateDirectory(System.IO.Path.GetDirectoryName(Path)!);
