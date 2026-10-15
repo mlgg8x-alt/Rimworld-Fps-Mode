@@ -84,7 +84,7 @@ All additive: the original IW4L side ignores fields and messages it does not kno
 
 | `t` | Direction | Meaning |
 |---|---|---|
-| `hello` | client → RW | `side` is `boomer` for the FPS client |
+| `hello` | client → RW | `side` is `fps` for the FPS client (`client/`) |
 | `snapshot` | RW → client | While a colonist is played: `player_health` (RimWorld's summary health, 0 to 1), `player_armor` (sharp armour rating, 0 to 2) and `player_weapon` (the held weapon's label), for the status bar; `player_gun.range`, how far the gun shoots in cells (the client's bullets go no further) |
 | `weather` | RW → client | `sky`: RimWorld's sky glow, 0 night to 1 noon. The client darkens the open sky and outdoors by it |
 | `player_shot` | client → RW | `damage` is optional now: RimWorld deals the colonist's own bullet damage (and its extra damage) for a hit, rolled as RimWorld rolls it; `damage` is used only for a gun without a bullet |

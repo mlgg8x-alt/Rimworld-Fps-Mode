@@ -423,8 +423,8 @@ pub enum Side {
     Rimworld,
     /// The original MW2 engine side (RimWorld x MW2).
     Iw4l,
-    /// FPS fork: the boomer shooter client (`boomer/`).
-    Boomer,
+    /// FPS fork: the first-person client (`client/`).
+    Fps,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

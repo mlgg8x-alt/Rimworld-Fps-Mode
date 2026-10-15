@@ -324,16 +324,20 @@ namespace RimWorldFPS
             return sb.Append(']').ToString();
         }
 
-        /// <summary>Words in the defs of art whose shape boxes cannot give.</summary>
+        /// <summary>Words in the defs of things the client stands up as their picture, as a 90s
+        /// shooter stands its lamps and statues: art whose shape boxes cannot give, and (FPS
+        /// fork) lights, instruments and the like that are thin or tall rather than boxy.</summary>
         private static readonly string[] UprightWords =
         {
             "Statue", "Sculpture", "Skullspike", "Totem", "Effigy", "Stele", "Monument",
+            "Lamp", "Torch", "Brazier", "Campfire", "Sconce", "Lightball", "PlantPot", "Ikebana",
+            "Drum", "Piano", "Harp", "Mannequin", "Lectern", "Throne", "Altar", "Popper", "Gong",
         };
 
         /// <summary>
-        /// Whether a building is art whose body the client cuts from its picture (statues,
-        /// sculptures, totems and the like), rather than a model of boxes. M16: thrones,
-        /// lecterns, instruments, altars and poppers are models again, made as what they are.
+        /// Whether a building gets a cut-out <c>card</c> picture to stand up, rather than a model
+        /// of boxes: art (statues, sculptures, totems) and the things in
+        /// <see cref="UprightWords"/>. Conduits and wall-mounted lights are thin enough either way.
         /// </summary>
         internal static bool Upright(ThingDef def)
         {

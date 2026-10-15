@@ -25,3 +25,7 @@ __pycache__/
 
 # Logs from play runs
 logs/
+
+# FPS client build output
+client/bin/
+client/obj/

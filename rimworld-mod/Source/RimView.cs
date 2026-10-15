@@ -62,6 +62,39 @@ namespace RimWorldFPS
             public bool screenshot;
         }
 
+        /// <summary>FPS fork: where the client wants the minimap, from its HUD layout: the top
+        /// left corner (pixels into its window), the side in pixels, round or square, how far
+        /// out it looks (times RimWorld's own zoom), or not shown at all. Null: the default
+        /// corner.</summary>
+        private static Placement placement;
+        /// <summary>The side the round cut was made for, so it is made again only when it changes.</summary>
+        private static int roundFor = -1;
+
+        private sealed class Placement
+        {
+            public int x, y, size;
+            public bool shown = true, round;
+            public float zoom = 1f;
+        }
+
+        /// <summary>A <c>minimap</c>: the client's HUD says where RimWorld's window goes.</summary>
+        public static void Place(float? x, float? y, float? size, bool shown, bool round, float? zoom)
+        {
+            placement = new Placement
+            {
+                x = Mathf.RoundToInt(x ?? 0f),
+                y = Mathf.RoundToInt(y ?? 0f),
+                size = Mathf.Max(80, Mathf.RoundToInt(size ?? 300f)),
+                shown = shown,
+                round = round,
+                zoom = Mathf.Clamp(zoom ?? 1f, 0.3f, 4f),
+            };
+            placed = false;
+            roundFor = -1;
+        }
+
+        private static float ZoomNow => placement?.zoom ?? Zoom;
+
         /// <summary>A <c>spectate</c>: where the FPS player flies, x and z in cells.</summary>
         public static void Spectate(float x, float z)
         {
@@ -152,7 +185,7 @@ namespace RimWorldFPS
             // At once, not next frame (M17: the minimap lagged behind the colonist).
             ApplyCamera?.Invoke(driver, null);
             if (!ownSize.HasValue) ownSize = driver.RootSize;
-            float wide = Mathf.Min(ownSize.Value * Zoom, driver.config.sizeRange.max);
+            float wide = Mathf.Clamp(ownSize.Value * ZoomNow, driver.config.sizeRange.min, driver.config.sizeRange.max);
             if (Mathf.Abs(driver.RootSize - wide) > 0.01f)
             {
                 driver.SetRootSize(wide);
@@ -242,6 +275,7 @@ namespace RimWorldFPS
         private static bool StillWanted(float now)
         {
             if (!Windows || clientWindow == IntPtr.Zero || !IsWindow(clientWindow)) return false;
+            if (placement != null && !placement.shown) return false;
             if (Current.ProgramState != ProgramState.Playing) return false;
             if (PlayerPawn.Current(PawnSnapshot.MapInView()) == null) return false;
             if (!IsWindowVisible(clientWindow) || IsIconic(clientWindow)) return false;
@@ -276,6 +310,7 @@ namespace RimWorldFPS
         private static bool WantOverlay()
         {
             if (!Windows || !Following || clientWindow == IntPtr.Zero || menuOpen) return false;
+            if (placement != null && !placement.shown) return false;
             if (Current.ProgramState != ProgramState.Playing) return false;
             if (PlayerPawn.Current(PawnSnapshot.MapInView()) == null) return false;
             if (!IsWindowVisible(clientWindow) || IsIconic(clientWindow)) return false;
@@ -390,6 +425,18 @@ namespace RimWorldFPS
             if (ex != tool) SetWindowLongPtr(own, GwlExStyle, new IntPtr(tool));
             SetWindowPos(own, HwndTopmost, (int)target.x, (int)target.y, side, side,
                 SwpNoActivate | SwpFrameChanged | SwpShowWindow);
+            // FPS fork: a round minimap, cut by a window region.
+            bool round = placement?.round ?? false;
+            if (round && roundFor != side)
+            {
+                SetWindowRgn(own, CreateEllipticRgn(0, 0, side + 1, side + 1), true);
+                roundFor = side;
+            }
+            else if (!round && roundFor != -1)
+            {
+                SetWindowRgn(own, IntPtr.Zero, true);
+                roundFor = -1;
+            }
             placed = true;
         }
 
@@ -403,6 +450,15 @@ namespace RimWorldFPS
             if (!ClientToScreen(clientWindow, ref origin)) return false;
             int height = client.Bottom - client.Top;
             if (height <= 0) return false;
+            if (placement != null)
+            {
+                int width = client.Right - client.Left;
+                int size = Mathf.Min(placement.size, Mathf.Min(width, height));
+                int px = Mathf.Clamp(placement.x, 0, Mathf.Max(0, width - size));
+                int py = Mathf.Clamp(placement.y, 0, Mathf.Max(0, height - size));
+                corner = new Rect(origin.X + px, origin.Y + py, size, size);
+                return true;
+            }
             int side = Mathf.Max(200, Mathf.RoundToInt(height * Side));
             corner = new Rect(origin.X, origin.Y, side, side);
             return true;
@@ -421,6 +477,11 @@ namespace RimWorldFPS
             saved = null;
             if (was == null) return;
             IntPtr own = new IntPtr(OwnWindow());
+            if (own != IntPtr.Zero && roundFor != -1)
+            {
+                SetWindowRgn(own, IntPtr.Zero, true);
+                roundFor = -1;
+            }
             if (own != IntPtr.Zero)
             {
                 SetWindowLongPtr(own, GwlStyle, new IntPtr(was.style));
@@ -548,6 +609,8 @@ namespace RimWorldFPS
         [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")] private static extern IntPtr GetWindowLongPtr(IntPtr window, int index);
         [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW")] private static extern IntPtr SetWindowLongPtr(IntPtr window, int index, IntPtr value);
         [DllImport("user32.dll")] private static extern bool SetWindowPos(IntPtr window, IntPtr after, int x, int y, int width, int height, uint flags);
+        [DllImport("user32.dll")] private static extern int SetWindowRgn(IntPtr window, IntPtr region, bool redraw);
+        [DllImport("gdi32.dll")] private static extern IntPtr CreateEllipticRgn(int left, int top, int right, int bottom);
     }
 
     /// <summary>RimWorld keeps the player's window size in their settings; the minimap's is not

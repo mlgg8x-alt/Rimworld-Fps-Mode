@@ -68,6 +68,7 @@ namespace RimWorldFPS
             WeatherReport.Reset();
             FleckReport.Reset();
             HeldReport.Reset();
+            StatusReport.Reset();
             ShotReport.Send = line =>
             {
                 if (client != null && client.Connected) client.Send(line);
@@ -103,6 +104,7 @@ namespace RimWorldFPS
                 EffectsReport.Reset();
                 WeatherReport.Reset();
                 FleckReport.Reset();
+                StatusReport.Reset();
                 RimView.Drop();
                 return;
             }
@@ -126,6 +128,8 @@ namespace RimWorldFPS
             if (looks != null) SendAfterArt(looks);
             string flora = FloraReport.Poll();
             if (flora != null) SendAfterArt(flora);
+            string status = StatusReport.Poll();
+            if (status != null) client.Send(status);
             string doors = DoorReport.Poll();
             if (doors != null) client.Send(doors);
             foreach (string line in EffectsReport.Poll())
@@ -187,6 +191,10 @@ namespace RimWorldFPS
                 case "hello":
                     RimView.Window(message.Str("window"));
                     Log.Message($"[RimWorldFPS] <- {line}");
+                    break;
+                case "minimap":
+                    RimView.Place(message.Num("x"), message.Num("y"), message.Num("size"), message.Str("shown") != "false",
+                        message.Str("round") == "true", message.Num("zoom"));
                     break;
                 case "player_melee":
                     if (message.Str("pawn") != null && message.Str("target") != null)
