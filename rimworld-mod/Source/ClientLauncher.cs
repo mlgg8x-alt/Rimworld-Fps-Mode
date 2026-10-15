@@ -18,6 +18,8 @@ namespace RimWorldFPS
     {
         private static Process process;
         private static string exe;
+        private static string modRoot;
+        private static bool manualStart;
         private static float nextCheck;
         private static int restarts;
         private const int MaxRestarts = 5;
@@ -40,6 +42,14 @@ namespace RimWorldFPS
         private static float runningAt = -10f;
         /// <summary>Why the client is not running, for the dot's tooltip; null when nothing went wrong.</summary>
         public static string Problem;
+
+        public static bool FatalError => !string.IsNullOrEmpty(Problem);
+
+        public static string StatusText => BridgeGameComponent.Linked
+            ? "Online and connected"
+            : FatalError
+                ? "Fatal error: " + Problem
+                : Running ? "Running, not connected" : "Not connected";
 
         /// <summary>Something listens on the bridge's port (our client, or one started by hand):
         /// tried by binding it, which needs no rights, unlike listing processes. Once a second.</summary>
@@ -92,6 +102,7 @@ namespace RimWorldFPS
         /// <summary>At RimWorld's start.</summary>
         public static void Start(string modRoot)
         {
+            ClientLauncher.modRoot = modRoot;
             try
             {
                 exe = Find(modRoot);
@@ -111,9 +122,9 @@ namespace RimWorldFPS
             Launch();
         }
 
-        private static void Launch()
+        private static void Launch(bool force = false)
         {
-            if (!BridgeMod.Settings.LaunchClient || exe == null) return;
+            if ((!force && !BridgeMod.Settings.LaunchClient) || exe == null) return;
             if (PortInUse())
             {
                 Log.Message($"[RimWorldFPS] something already listens on port {BridgeMod.Settings.Port}: the FPS client is running");
@@ -131,6 +142,8 @@ namespace RimWorldFPS
                     WorkingDirectory = Path.GetDirectoryName(exe),
                 };
                 process = Process.Start(info);
+                if (process == null)
+                    throw new InvalidOperationException("The operating system did not return a client process.");
                 runningAt = -10f;
                 Problem = null;
                 Log.Message($"[RimWorldFPS] started the FPS client in the background (process {process?.Id}); its log: {LogPath}");
@@ -169,7 +182,7 @@ namespace RimWorldFPS
         /// <summary>Every frame: started again if it stopped (a few times at most).</summary>
         public static void Watch()
         {
-            if (exe == null || !BridgeMod.Settings.LaunchClient || Time.realtimeSinceStartup < nextCheck) return;
+            if (exe == null || (!BridgeMod.Settings.LaunchClient && !manualStart) || Time.realtimeSinceStartup < nextCheck) return;
             nextCheck = Time.realtimeSinceStartup + 5f;
             if (Running) return;
             if (restarts >= MaxRestarts)
@@ -179,16 +192,33 @@ namespace RimWorldFPS
             }
             restarts++;
             Log.Message($"[RimWorldFPS] the FPS client stopped; starting it again ({restarts}/{MaxRestarts})");
-            Launch();
+            Launch(manualStart);
         }
 
         /// <summary>The dot was clicked while offline: try again now.</summary>
         public static void Restart()
         {
+            ForceStart();
+        }
+
+        /// <summary>Starts the client even when automatic launch is disabled.</summary>
+        public static void ForceStart()
+        {
+            manualStart = true;
             restarts = 0;
             nextCheck = 0;
-            if (exe == null) Log.Error("[RimWorldFPS] " + (Problem ?? "no FPS client for this computer in the mod's Client folder"));
-            else Launch();
+            Problem = null;
+            if (exe == null && !string.IsNullOrEmpty(modRoot))
+            {
+                try { exe = Find(modRoot); }
+                catch (Exception e) { Problem = "could not look for the client: " + e.Message; }
+            }
+            if (exe == null)
+            {
+                Problem = Problem ?? $"no client for {Application.platform} in the mod's Client folder";
+                Log.Error("[RimWorldFPS] " + Problem);
+            }
+            else Launch(true);
         }
 
         /// <summary>RimWorld is quitting: the client goes too.</summary>
@@ -202,6 +232,7 @@ namespace RimWorldFPS
             {
             }
             process = null;
+            manualStart = false;
         }
     }
 }
