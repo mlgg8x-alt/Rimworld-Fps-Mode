@@ -7,7 +7,10 @@ tested and what has not, and what to do next.
 - Repository: https://github.com/mlgg8x-alt/Rimworld-Fps-Mode
 - Working branch (all current code): `ccr-6e26a519-k6f9ln`. The default branch still holds the
   original upstream project.
-- Latest test build: `dist/RimWorldFPS-v5.zip` on that branch.
+- Latest test build: `dist/` on that branch. **Every build carries this handoff and the whole
+  source inside the mod folder** (`RimWorldFPS/HANDOFF.md`, `RimWorldFPS/Source/`, with the commit
+  in `Source/COMMIT`), so the project can be picked up from the installed mod alone.
+- Android/RimDroid work is on its own branch, `rimdroid` (see Platforms).
 
 ## What it is
 
@@ -129,7 +132,9 @@ dotnet publish client/RimFpsClient.csproj -c Release -r win-x64   --self-contain
 dotnet publish client/RimFpsClient.csproj -c Release -r linux-x64 --self-contained -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:PublishTrimmed=true -p:TrimMode=partial -p:JsonSerializerIsReflectionEnabledByDefault=true -p:EnableCompressionInSingleFile=true -o out/linux-x64
 ```
 
-Package layout (zip the `RimWorldFPS` folder; players unzip into `RimWorld/Mods`):
+`scripts/package.sh [name]` does all of it (build, publish both clients, assemble, zip into
+`dist/<name>.zip`, including this handoff and the source). Package layout (players unzip into
+`RimWorld/Mods`):
 
 ```
 RimWorldFPS/
@@ -137,6 +142,8 @@ RimWorldFPS/
   1.6/Assemblies/RimWorldFPS.dll
   Client/win-x64/RimFpsClient.exe
   Client/linux-x64/RimFpsClient      (chmod +x)
+  HANDOFF.md, TESTING.md, README.md  (RimWorld ignores them)
+  Source/                            (the repository; RimWorld ignores it)
 ```
 
 Keep the zip under 30 MB if it is sent as a chat attachment (v5 is about 15 MB).
