@@ -23,6 +23,10 @@ public sealed class Launch
     public float Rain, Fog;
     public bool Burning;
     public string? Weapon;
+    /// <summary>Started by the mod with RimWorld: hidden until a colonist is played, and gone
+    /// when RimWorld (process <see cref="Parent"/>) is.</summary>
+    public bool Background;
+    public int Parent;
 }
 
 /// <summary>
@@ -61,7 +65,21 @@ public sealed class App : IDisposable
     private long ownWindow;
     private int connections;
     private bool told, hidden, captured, fullscreen, menuTold, toggledAim;
-    private float rimworldGone, sinceMinimap;
+    private float rimworldGone, sinceMinimap, parentCheck;
+    private bool started;
+
+    private static bool Alive(int pid)
+    {
+        try
+        {
+            using var process = System.Diagnostics.Process.GetProcessById(pid);
+            return !process.HasExited;
+        }
+        catch (Exception e) when (e is ArgumentException or InvalidOperationException)
+        {
+            return false;
+        }
+    }
     private string? minimapSent;
     private int frame;
     private bool built;
@@ -76,6 +94,7 @@ public sealed class App : IDisposable
         Raylib.SetTraceLogLevel(TraceLogLevel.Warning);
         var flags = ConfigFlags.ResizableWindow | ConfigFlags.VSyncHint;
         if (!settings.Retro) flags |= ConfigFlags.Msaa4xHint;
+        if (launch.Background) flags |= ConfigFlags.HiddenWindow;
         Raylib.SetConfigFlags(flags);
         Raylib.InitWindow(launch.Width, launch.Height, "RimWorld FPS");
         Raylib.SetWindowMinSize(480, 300);
@@ -385,11 +404,17 @@ public sealed class App : IDisposable
             bridge.SendHello();
             told = true;
         }
-        bool hide = settings.OneWindow && Native.Windows && link.Connected && link.Snapshots > 0 && link.Snap?.PlayerPawn == null;
+        bool hide = launch.Background
+            ? !link.Connected || link.Snap?.PlayerPawn == null
+            : settings.OneWindow && Native.Windows && link.Connected && link.Snapshots > 0 && link.Snap?.PlayerPawn == null;
+        if (launch.Background && !started) hidden = true;
+        started = true;
         if (hide != hidden)
         {
             hidden = hide;
-            Native.Show(ownWindow, !hide);
+            if (Native.Windows && ownWindow != 0) Native.Show(ownWindow, !hide);
+            else if (hide) Raylib.SetWindowState(ConfigFlags.HiddenWindow);
+            else Raylib.ClearWindowState(ConfigFlags.HiddenWindow);
             if (!hide && settings.Fullscreen && !fullscreen && !Raylib.IsWindowFullscreen())
             {
                 Raylib.ToggleBorderlessWindowed();
@@ -397,6 +422,15 @@ public sealed class App : IDisposable
                 hud.LayoutChanged = true;
             }
             Console.WriteLine(hide ? "[fps] hiding until RimWorld hands over a colonist" : "[fps] playing a colonist");
+        }
+        if (launch.Parent > 0 && (parentCheck -= dt) <= 0)
+        {
+            parentCheck = 2f;
+            if (!Alive(launch.Parent))
+            {
+                Console.WriteLine("[fps] RimWorld has closed: closing too");
+                menu.Quit = true;
+            }
         }
         if (settings.OneWindow && link.RimworldWindow != 0 && !link.Connected && !Native.Exists(link.RimworldWindow))
         {
@@ -537,14 +571,14 @@ public sealed class App : IDisposable
         sprites.Flush(renderer, atlas);
         Rlgl.EnableBackfaceCulling();
         Raylib.EndMode3D();
-        // The weapon in hand, always in front, lit where the player stands.
+        renderer.EndScene();
+        // The weapon in hand, flat on the screen in front of everything, lit where the player stands.
         if (!automap.Open)
         {
             Color here = LitAt(player.X, player.Z, 1f);
             hands.Hold = hud.Editing ? (weaponEditor.AimTab ? 1f : 0f) : null;
-            hands.Draw(link, player, gun, pictures, atlas, art, renderer, settings, new Vector3(here.R, here.G, here.B) / 255f * 1.05f);
+            hands.Draw(link, player, gun, pictures, atlas, art, settings, new Vector3(here.R, here.G, here.B) / 255f * 1.05f, ww, wh);
         }
-        renderer.EndScene();
 
         // Who the crosshair is on.
         lookingAt = null;

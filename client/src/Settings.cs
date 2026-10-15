@@ -18,52 +18,52 @@ public sealed class Widget
     public Widget Copy() => (Widget)MemberwiseClone();
 }
 
-/// <summary>How a weapon is held, set in the HUD's edit mode: where its grip sits in front of
-/// the eye (x right, y up, -z ahead) and how it is turned, at the hip and when aiming; its
-/// size and thickness against the automatic ones; and where the hands and the muzzle are on
-/// its picture (u from its back end, v up from its bottom, 0 to 1; below 0 means found
-/// automatically from its outline).</summary>
+/// <summary>How a weapon is held, set in the HUD's edit mode, all in 2D on the screen: where
+/// its grip is (a share of the screen's width and height) and which way it points (degrees
+/// clockwise from the right), at the hip and when aiming; its size against the automatic one;
+/// the dark edge that gives it depth; the hands; and where the hands and the muzzle are on its
+/// picture (0 to 1, x right and y down; null means found from its outline).</summary>
 public sealed class WeaponPose
 {
-    public float X { get; set; }
-    public float Y { get; set; }
-    public float Z { get; set; }
-    public float Yaw { get; set; }
-    public float Pitch { get; set; }
-    public float Roll { get; set; }
-    public float AimX { get; set; }
-    public float AimY { get; set; }
-    public float AimZ { get; set; }
-    public float AimYaw { get; set; }
-    public float AimPitch { get; set; }
-    public float AimRoll { get; set; }
+    public float GripX { get; set; }
+    public float GripY { get; set; }
+    public float Point { get; set; }
+    public float AimGripX { get; set; }
+    public float AimGripY { get; set; }
+    public float AimPoint { get; set; }
     public float Size { get; set; } = 1f;
-    public float Depth { get; set; } = 1f;
+    public float Thickness { get; set; } = 1f;
     public float HandSize { get; set; } = 1f;
     /// <summary>0 automatic, 1 one hand, 2 two hands.</summary>
     public int HandCount { get; set; }
-    public float GripU { get; set; } = -1f;
-    public float GripV { get; set; } = -1f;
-    public float ForeU { get; set; } = -1f;
-    public float ForeV { get; set; } = -1f;
-    public float MuzzleU { get; set; } = -1f;
-    public float MuzzleV { get; set; } = -1f;
+    /// <summary>0 automatic (mirrored when it points left, so it is never upside down), 1 mirrored, 2 not.</summary>
+    public int Flip { get; set; }
+    public float[]? Grip { get; set; }
+    public float[]? Fore { get; set; }
+    public float[]? Muzzle { get; set; }
 
-    public WeaponPose Copy() => (WeaponPose)MemberwiseClone();
+    public WeaponPose Copy()
+    {
+        var copy = (WeaponPose)MemberwiseClone();
+        copy.Grip = Grip?.ToArray();
+        copy.Fore = Fore?.ToArray();
+        copy.Muzzle = Muzzle?.ToArray();
+        return copy;
+    }
 
-    /// <summary>A gun: low at the right hip, turned in so its side shows; aimed, under the
-    /// middle of the view.</summary>
+    /// <summary>A gun: low on the right, pointing up and in at the middle; aimed, brought in
+    /// under the crosshair.</summary>
     public static WeaponPose Gun() => new()
     {
-        X = 0.13f, Y = -0.125f, Z = -0.34f, Yaw = 26f, Pitch = 3f, Roll = -4f,
-        AimX = 0.04f, AimY = -0.09f, AimZ = -0.36f, AimYaw = 12f, AimPitch = 2f, AimRoll = 0f,
+        GripX = 0.7f, GripY = 0.88f, Point = 202f,
+        AimGripX = 0.585f, AimGripY = 0.83f, AimPoint = 196f,
     };
 
-    /// <summary>A melee weapon: raised over the right shoulder, ready to swing.</summary>
+    /// <summary>A melee weapon: up on the right, ready to swing down and across.</summary>
     public static WeaponPose Melee() => new()
     {
-        X = 0.15f, Y = -0.115f, Z = -0.3f, Yaw = 22f, Pitch = 60f, Roll = -12f,
-        AimX = 0.15f, AimY = -0.115f, AimZ = -0.3f, AimYaw = 22f, AimPitch = 60f, AimRoll = -12f,
+        GripX = 0.76f, GripY = 0.94f, Point = 248f,
+        AimGripX = 0.76f, AimGripY = 0.94f, AimPoint = 248f,
     };
 }
 

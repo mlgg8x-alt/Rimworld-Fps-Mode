@@ -109,6 +109,9 @@ public sealed class Figures
     /// <summary>Degrees clockwise from north of something moving vx east and vz north.</summary>
     public static float Heading(float vx, float vz) => (MathF.Atan2(vx, vz) * 180f / MathF.PI + 360f) % 360f;
 
+    /// <summary>The shortest turn from one angle to another, in degrees (-180 to 180).</summary>
+    public static float AngleDiff(float from, float to) => ((to - from) % 360f + 540f) % 360f - 180f;
+
     public static float TurnTowards(float from, float to, float share)
     {
         float delta = ((to - from + 540f) % 360f) - 180f;

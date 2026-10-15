@@ -1,58 +1,78 @@
 using System.Numerics;
 using RimFps.Net;
-using RimFps.Render;
+using RimFps.UI;
 using RimFps.World;
 using Raylib_cs;
 
 namespace RimFps.Game;
 
 /// <summary>
-/// What the player holds, in 3D in front of them: the colonist's weapon, built from its RimWorld
-/// picture (<see cref="WeaponModel"/>), held by two round hands in their skin colour, the way
-/// RimWorld draws hands. It sits at the hip or comes up to the eye when aiming, lowers to run,
-/// bobs, sways behind the mouse, kicks with each shot, dips while RimWorld's cooldown cycles the
-/// gun, swings melee weapons in an arc, bashes with guns, and throws grenades. Drawn with its own
-/// camera and always in front of the world, so it never sinks into a wall.
+/// What the player holds, drawn flat on the screen in front of everything: the colonist's
+/// weapon as its own RimWorld picture (<see cref="WeaponModel"/>), held by round hands in their
+/// skin colour, the way RimWorld draws hands. It sits low on the right or comes in under the
+/// crosshair when aiming, lowers to run, bobs, sways behind the mouse, kicks with each shot,
+/// dips while RimWorld's cooldown cycles the gun, swings melee weapons down and across, bashes
+/// with guns, and throws grenades. Where it sits is the player's to change in the HUD's edit
+/// mode (<see cref="WeaponPose"/>).
 /// </summary>
 public sealed class Hands : IDisposable
 {
-    private readonly Dictionary<int, WeaponModel?> models = new();
+    private readonly Dictionary<(int, float), WeaponModel?> models = new();
     private float time, swayX, swayY, swayRoll;
     private Vector2 lastLook;
     private float sprint, aim, flash;
-    private Pic? handPic;
 
     /// <summary>How far aimed down the sights, 0 to 1, for the camera's zoom.</summary>
     public float Aim => aim;
 
-    /// <summary>The camera the weapon is drawn with: the eye, looking down -z.</summary>
-    public static readonly Camera3D Camera = new(Vector3.Zero, new Vector3(0, 0, -1), Vector3.UnitY, 54f, CameraProjection.Perspective);
-
     /// <summary>Set while the HUD is edited: the weapon held still, at the hip (0) or aimed (1).</summary>
     public float? Hold;
 
-    /// <summary>The weapon drawn last frame, for the editor: its model, picture, pose, and
-    /// where its hands and muzzle were in view space.</summary>
+    /// <summary>The weapon drawn last frame, for the editor.</summary>
     public WeaponModel? Shown { get; private set; }
     public string ShownName { get; private set; } = "";
-    public Matrix4x4 ShownPose { get; private set; }
-    public Vector3 ShownGrip { get; private set; }
-    public Vector3? ShownFore { get; private set; }
-    public Vector3? ShownMuzzle { get; private set; }
+    public Placed ShownAt { get; private set; }
+    public Vector2 ShownGrip { get; private set; }
+    public Vector2? ShownFore { get; private set; }
+    public Vector2? ShownMuzzle { get; private set; }
 
-    /// <summary>Where the hands and the muzzle are on a weapon, in its model space: as the
-    /// player put them, else as its outline says.</summary>
-    public static Vector2 GripOf(WeaponModel m, WeaponPose p) => p.GripU >= 0 ? new(p.GripU * m.Length, p.GripV * m.Height) : m.Grip;
-    public static Vector2 ForeOf(WeaponModel m, WeaponPose p) => p.ForeU >= 0 ? new(p.ForeU * m.Length, p.ForeV * m.Height) : m.Fore;
-    public static Vector2 MuzzleOf(WeaponModel m, WeaponPose p) => p.MuzzleU >= 0 ? new(p.MuzzleU * m.Length, p.MuzzleV * m.Height) : m.Muzzle;
-    public static bool TwoHands(WeaponModel m, WeaponPose p) => p.HandCount == 2 || p.HandCount == 0 && m.TwoHanded && !m.Melee;
+    /// <summary>A weapon's picture placed on the screen: its grip at <see cref="At"/>, turned
+    /// <see cref="Turn"/> degrees, <see cref="Scale"/> screen pixels to a picture pixel,
+    /// mirrored or not.</summary>
+    public readonly record struct Placed(WeaponModel Model, Vector2 At, float Turn, float Scale, bool Mirror, Vector2 Grip)
+    {
+        private Vector2 Local(Vector2 p) => new(((Mirror ? 1 - p.X : p.X) - (Mirror ? 1 - Grip.X : Grip.X)) * Model.W * Scale, (p.Y - Grip.Y) * Model.H * Scale);
+
+        /// <summary>A point of the picture (0 to 1) on the screen.</summary>
+        public Vector2 ToScreen(Vector2 p)
+        {
+            Vector2 l = Local(p);
+            float r = Turn * MathF.PI / 180f, c = MathF.Cos(r), s = MathF.Sin(r);
+            return At + new Vector2(l.X * c - l.Y * s, l.X * s + l.Y * c);
+        }
+
+        /// <summary>A point of the screen on the picture (0 to 1).</summary>
+        public Vector2 ToPicture(Vector2 screen)
+        {
+            Vector2 d = screen - At;
+            float r = -Turn * MathF.PI / 180f, c = MathF.Cos(r), s = MathF.Sin(r);
+            var l = new Vector2(d.X * c - d.Y * s, d.X * s + d.Y * c);
+            float gx = Mirror ? 1 - Grip.X : Grip.X;
+            float x = l.X / (Model.W * Scale) + gx, y = l.Y / (Model.H * Scale) + Grip.Y;
+            return new Vector2(Mirror ? 1 - x : x, y);
+        }
+
+        /// <summary>The picture's corners on the screen.</summary>
+        public Vector2[] Corners() => new[] { ToScreen(new(0, 0)), ToScreen(new(1, 0)), ToScreen(new(1, 1)), ToScreen(new(0, 1)) };
+    }
 
     private WeaponModel? Model(Pictures pictures, Held held)
     {
-        if (models.TryGetValue(held.Tex, out WeaponModel? m)) return m;
-        m = WeaponModel.Build(pictures, held.Tex, new Vector2(held.W, held.H), held.Melee);
+        var key = (held.Tex, held.Turn);
+        if (models.TryGetValue(key, out WeaponModel? m)) return m;
+        m = WeaponModel.Build(pictures, held.Tex, new Vector2(held.W, held.H), held.Melee, held.Turn);
         // Not loaded yet: ask again next frame.
-        if (m != null) models[held.Tex] = m;
+        if (m != null) models[key] = m;
         return m;
     }
 
@@ -66,191 +86,178 @@ public sealed class Hands : IDisposable
         // Sway: the weapon lags behind the view, and settles.
         lastLook = Vector2.Lerp(lastLook, look, Math.Min(1f, dt * 12f));
         float k = 1f - aim * 0.8f;
-        swayX += (-lastLook.X * 0.00035f * k - swayX) * Math.Min(1f, dt * 10f);
-        swayY += (lastLook.Y * 0.00035f * k - swayY) * Math.Min(1f, dt * 10f);
-        swayRoll += (-lastLook.X * 0.03f * k - swayRoll) * Math.Min(1f, dt * 8f);
-        swayX = Math.Clamp(swayX, -0.03f, 0.03f);
-        swayY = Math.Clamp(swayY, -0.03f, 0.03f);
+        swayX += (-lastLook.X * 0.0012f * k - swayX) * Math.Min(1f, dt * 10f);
+        swayY += (-lastLook.Y * 0.0012f * k - swayY) * Math.Min(1f, dt * 10f);
+        swayRoll += (lastLook.X * 0.03f * k - swayRoll) * Math.Min(1f, dt * 8f);
+        swayX = Math.Clamp(swayX, -0.05f, 0.05f);
+        swayY = Math.Clamp(swayY, -0.05f, 0.05f);
         swayRoll = Math.Clamp(swayRoll, -6f, 6f);
         if (gun.Fired.Count > 0) flash = 0.05f;
         flash = Math.Max(0, flash - dt);
     }
 
-    private static Matrix4x4 Turn(float pitch, float yaw, float roll) =>
-        Matrix4x4.CreateRotationZ(roll * MathF.PI / 180f) * Matrix4x4.CreateRotationX(pitch * MathF.PI / 180f) * Matrix4x4.CreateRotationY(yaw * MathF.PI / 180f);
+    /// <summary>Where the hands and the muzzle are on a weapon's picture: as the player put
+    /// them, else as its outline says.</summary>
+    public static Vector2 GripOf(WeaponModel m, WeaponPose p) => p.Grip is { Length: 2 } g ? new(g[0], g[1]) : m.Grip;
+    public static Vector2 ForeOf(WeaponModel m, WeaponPose p) => p.Fore is { Length: 2 } g ? new(g[0], g[1]) : m.Fore;
+    public static Vector2 MuzzleOf(WeaponModel m, WeaponPose p) => p.Muzzle is { Length: 2 } g ? new(g[0], g[1]) : m.Muzzle;
+    public static bool TwoHands(WeaponModel m, WeaponPose p) => p.HandCount == 2 || p.HandCount == 0 && m.TwoHanded && !m.Melee;
 
-    /// <summary>Model space (x along the weapon, y up, z across) to view space (x right, y up,
-    /// -z ahead): the weapon points ahead.</summary>
-    private static readonly Matrix4x4 Ahead = new(0, 0, -1, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1);
+    /// <summary>Whether the picture is mirrored in this pose: when it points left, so it is
+    /// never drawn upside down.</summary>
+    public static bool Mirrored(WeaponPose p) => p.Flip == 1 || p.Flip == 0 && MathF.Cos(p.Point * MathF.PI / 180f) < 0;
 
-    public void Draw(Link link, Player player, Gun gun, Pictures pictures, Atlas atlas, Builtins art, Renderer renderer, Settings settings, Vector3 light)
+    /// <summary>The weapon's length on a screen <paramref name="h"/> pixels tall.</summary>
+    public static float LengthOnScreen(WeaponModel m, WeaponPose p, float h) =>
+        p.Size * h * (m.Melee ? Math.Clamp(0.22f + m.Length * 0.2f, 0.3f, 0.6f) : Math.Clamp(0.22f + m.Length * 0.2f, 0.3f, 0.56f));
+
+    /// <summary>The weapon placed by a pose, before it moves: at the hip, or aimed.</summary>
+    public static Placed Place(WeaponModel m, WeaponPose p, int w, int h, float aimed)
     {
+        bool mirror = Mirrored(p);
+        float e = aimed * aimed * (3 - 2 * aimed);
+        var at = Vector2.Lerp(new Vector2(p.GripX * w, p.GripY * h), new Vector2(p.AimGripX * w, p.AimGripY * h), e);
+        float point = p.Point + Figures.AngleDiff(p.Point, p.AimPoint) * e;
+        // The picture points Angle (mirrored: 180 - Angle); turned to point where the pose says.
+        float turn = point - (mirror ? 180f - m.Angle : m.Angle);
+        float scale = LengthOnScreen(m, p, h) / Math.Max(1f, m.LengthPixels);
+        return new Placed(m, at, turn, scale, mirror, GripOf(m, p));
+    }
+
+    public void Draw(Link link, Player player, Gun gun, Pictures pictures, Atlas atlas, Builtins art, Settings settings, Vector3 light, int w, int h)
+    {
+        Shown = null;
         PawnState? pawn = link.Player;
         if (pawn == null) return;
-        handPic ??= art.Hand;
-        Shown = null;
-        Raylib.BeginMode3D(Camera);
-        Rlgl.DisableBackfaceCulling();
-        renderer.HeldTint(light);
         var (skin, _) = Colours(link, pawn.Id);
-        float bob = settings.Bob && Hold == null ? player.Moving * (1f - aim * 0.85f) : 0f;
-        var bobbing = new Vector3(MathF.Sin(player.BobPhase) * 0.011f * bob, -MathF.Abs(MathF.Cos(player.BobPhase)) * 0.012f * bob + MathF.Sin(time * 1.7f) * 0.002f, 0);
-        var sway = Hold == null ? new Vector3(swayX, swayY, 0) : Vector3.Zero;
-        var hands = new List<(Vector3 at, float size)>();
-        Vector3? flashAt = null;
-        float flashSize = 0;
+        bool live = Hold == null;
+        float bob = settings.Bob && live ? player.Moving * (1f - aim * 0.85f) : 0f;
+        var shake = new Vector2(MathF.Sin(player.BobPhase) * 0.012f * bob, MathF.Abs(MathF.Cos(player.BobPhase)) * 0.014f * bob + MathF.Sin(time * 1.7f) * 0.002f) * h;
+        if (live) shake += new Vector2(swayX, swayY) * h;
+        var lit = new Color((byte)Math.Clamp(light.X * 255, 40, 255), (byte)Math.Clamp(light.Y * 255, 40, 255), (byte)Math.Clamp(light.Z * 255, 40, 255), (byte)255);
+        var hands = new List<(Vector2 at, float size)>();
+        float handSize = h * 0.03f;
 
         WeaponModel? model = pawn.Held != null ? Model(pictures, pawn.Held) : null;
         if (model != null && gun.Kind != Gun.Mode.Throw)
         {
             string name = pictures.Name(pawn.Held!.Tex);
             WeaponPose wp = settings.PoseFor(name, model.Melee);
-            Matrix4x4 pose = model.Melee ? MeleePose(model, gun, wp) : GunPose(model, gun, wp);
-            pose *= Matrix4x4.CreateTranslation(bobbing + sway);
-            model.Draw(renderer.HeldMaterial(model.Page), Matrix4x4.Transpose(pose));
-            Vector3 grip = Vector3.Transform(new Vector3(GripOf(model, wp), 0), pose);
-            float hand = wp.HandSize;
-            hands.Add((grip + new Vector3(0, 0, 0.012f), 0.017f * hand));
-            Vector3? fore = null;
-            if (TwoHands(model, wp)) fore = Vector3.Transform(new Vector3(ForeOf(model, wp), 0), pose);
-            else if (!model.Melee) hands.Add((grip + new Vector3(-0.018f, -0.012f, 0.004f), 0.016f * hand));
-            if (fore is Vector3 f) hands.Add((f + new Vector3(0, -0.004f, 0.01f), 0.016f * hand));
-            Vector3 tip = Vector3.Transform(new Vector3(MuzzleOf(model, wp), 0), pose);
-            if (!model.Melee && flash > 0 && Hold == null)
-            {
-                flashAt = Vector3.Transform(new Vector3(MuzzleOf(model, wp) + new Vector2(0.03f, 0), 0), pose);
-                flashSize = 0.06f + 0.03f * (float)Random.Shared.NextDouble();
-            }
+            Placed placed = model.Melee ? MeleePose(model, gun, wp, w, h) : GunPose(model, gun, wp, w, h);
+            placed = placed with { At = placed.At + shake };
+            DrawWeapon(atlas, placed, lit, wp.Thickness * h * 0.006f);
+            float hand = handSize * wp.HandSize;
+            Vector2 grip = placed.ToScreen(GripOf(model, wp));
+            Vector2? fore = TwoHands(model, wp) ? placed.ToScreen(ForeOf(model, wp)) : null;
+            if (fore is Vector2 f) hands.Add((f, hand * 0.95f));
+            else if (!model.Melee) hands.Add((grip + new Vector2(hand * 0.7f, hand * 0.55f), hand * 0.95f));
+            hands.Add((grip, hand));
+            Vector2 muzzle = placed.ToScreen(MuzzleOf(model, wp));
             Shown = model;
             ShownName = name;
-            ShownPose = pose;
+            ShownAt = placed;
             ShownGrip = grip;
             ShownFore = fore;
-            ShownMuzzle = model.Melee ? null : tip;
+            ShownMuzzle = model.Melee ? null : muzzle;
+            DrawHands(hands, skin);
+            if (!model.Melee && flash > 0 && live)
+            {
+                float r = placed.Turn * MathF.PI / 180f;
+                var way = new Vector2(MathF.Cos(r), MathF.Sin(r)) * (placed.Mirror ? -1f : 1f);
+                Pic glow = art.Flash[(int)(time * 30) % art.Flash.Length];
+                float size = h * (0.1f + 0.04f * (float)Random.Shared.NextDouble());
+                Vector2 at = muzzle + way * size * 0.3f;
+                Ui.Picture(atlas, glow, new Rectangle(at.X, at.Y, size, size), Color.White, rotation: (float)Random.Shared.NextDouble() * 360f, origin: new Vector2(size / 2, size / 2));
+            }
+            return;
         }
-        else if (gun.Kind == Gun.Mode.Throw)
+        if (gun.Kind == Gun.Mode.Throw)
         {
             // A grenade in the hand, thrown with a swing of the arm.
             float t = gun.Throw >= 0 ? gun.Throw : 0;
             bool gone = gun.Throw >= 0.45f || gun.Throw < 0 && gun.Wait > 0;
-            var hand = new Vector3(0.14f - t * 0.1f, -0.13f + MathF.Sin(t * MathF.PI) * 0.12f, -0.28f - t * 0.15f) + bobbing + sway;
-            if (gone && gun.Throw < 0) hand.Y -= 0.2f;
+            var hand = new Vector2(w * (0.74f - t * 0.2f), h * (0.88f - MathF.Sin(t * MathF.PI) * 0.25f)) + shake;
+            if (gone && gun.Throw < 0) hand.Y += h * 0.3f;
             if (!gone && pawn.Held != null && pictures.Get(pawn.Held.Tex) is Pic grenade)
             {
-                Raylib.BeginShaderMode(renderer.HeldShader);
-                Sprite(atlas, grenade, hand + new Vector3(0, 0.03f, -0.01f), 0.07f, Color.White);
-                Rlgl.DrawRenderBatchActive();
-                Raylib.EndShaderMode();
+                float size = h * 0.11f;
+                Ui.Picture(atlas, grenade, new Rectangle(hand.X, hand.Y - size * 0.3f, size, size), lit, origin: new Vector2(size / 2, size / 2));
             }
-            hands.Add((hand, 0.02f));
+            hands.Add((hand, handSize));
         }
         else
         {
             // Bare hands: two fists up, the right one punching.
             float t = gun.Swing >= 0 ? gun.Swing : 0;
             float punch = MathF.Sin(t * MathF.PI);
-            hands.Add((new Vector3(0.12f - punch * 0.1f, -0.13f + punch * 0.06f, -0.27f - punch * 0.18f) + bobbing + sway, 0.024f));
-            hands.Add((new Vector3(-0.12f, -0.14f, -0.27f) + bobbing * 0.7f + sway, 0.024f));
+            hands.Add((new Vector2(w * (0.68f - punch * 0.14f), h * (0.86f - punch * 0.12f)) + shake, handSize * (1.3f - punch * 0.25f)));
+            hands.Add((new Vector2(w * 0.32f, h * 0.88f) + shake * 0.7f, handSize * 1.3f));
         }
-
-        // The hands: round, as RimWorld's, in the colonist's skin, on top of what they hold
-        // (as RimWorld draws them).
-        Rlgl.DrawRenderBatchActive();
-        Rlgl.DisableDepthTest();
-        Raylib.BeginShaderMode(renderer.HeldShader);
-        foreach (var (at, size) in hands) Sprite(atlas, handPic, at, size * 2f, skin);
-        Rlgl.DrawRenderBatchActive();
-        if (flashAt is Vector3 muzzle)
-        {
-            // The muzzle flash glows whatever the light.
-            renderer.HeldTint(new Vector3(1.4f));
-            Sprite(atlas, art.Flash[(int)(time * 30) % 2], muzzle, flashSize, Color.White);
-            Rlgl.DrawRenderBatchActive();
-            renderer.HeldTint(light);
-        }
-        Raylib.EndShaderMode();
-        Rlgl.EnableDepthTest();
-        Rlgl.EnableBackfaceCulling();
-        Raylib.EndMode3D();
+        DrawHands(hands, skin);
     }
 
-    /// <summary>A gun at the hip, or up at the eye when aiming, as the player placed it; lowered
-    /// to run, dipped while it cycles, kicked by each shot, thrust out to bash.</summary>
-    private Matrix4x4 GunPose(WeaponModel m, Gun gun, WeaponPose wp)
+    /// <summary>The picture, with a darker copy just below it for its edge, so it reads as a
+    /// solid thing rather than a sticker.</summary>
+    private static void DrawWeapon(Atlas atlas, Placed p, Color lit, float edge)
     {
-        float scale = Math.Clamp(m.Length * 0.22f, 0.12f, 0.32f) / m.Length * wp.Size;
-        Matrix4x4 size = Matrix4x4.CreateScale(scale, scale, scale * wp.Depth);
-        var grip3 = new Vector3(GripOf(m, wp), 0);
-        Matrix4x4 hip = size * Ahead * Turn(wp.Pitch, wp.Yaw, wp.Roll);
-        hip *= Matrix4x4.CreateTranslation(new Vector3(wp.X, wp.Y, wp.Z) - Vector3.Transform(grip3, hip));
-        Matrix4x4 ads = size * Ahead * Turn(wp.AimPitch, wp.AimYaw, wp.AimRoll);
-        ads *= Matrix4x4.CreateTranslation(new Vector3(wp.AimX, wp.AimY, wp.AimZ) - Vector3.Transform(grip3, ads));
-        if (Hold is float held) return Blend(hip, ads, held);
-        Matrix4x4 pose = Blend(hip, ads, aim);
+        WeaponModel m = p.Model;
+        var size = new Vector2(m.W * p.Scale, m.H * p.Scale);
+        float gx = p.Mirror ? 1 - p.Grip.X : p.Grip.X;
+        var origin = new Vector2(gx * size.X, p.Grip.Y * size.Y);
+        if (edge > 0.2f)
+        {
+            var dark = new Color((byte)(lit.R * 0.28f), (byte)(lit.G * 0.28f), (byte)(lit.B * 0.28f), (byte)235);
+            for (float d = edge; d > 0; d -= Math.Max(1f, edge / 3f))
+                Ui.Picture(atlas, m.Pic, new Rectangle(p.At.X + d * 0.5f, p.At.Y + d, size.X, size.Y), dark, p.Mirror, p.Turn, origin);
+        }
+        Ui.Picture(atlas, m.Pic, new Rectangle(p.At.X, p.At.Y, size.X, size.Y), lit, p.Mirror, p.Turn, origin);
+    }
+
+    /// <summary>Round hands, as RimWorld draws them: skin with a dark rim.</summary>
+    private static void DrawHands(List<(Vector2 at, float size)> hands, Color skin)
+    {
+        var rim = new Color((byte)(skin.R * 0.45f), (byte)(skin.G * 0.4f), (byte)(skin.B * 0.38f), (byte)255);
+        foreach (var (at, size) in hands)
+        {
+            Raylib.DrawCircleV(at, size + Math.Max(1.5f, size * 0.14f), rim);
+            Raylib.DrawCircleV(at, size, skin);
+            Raylib.DrawCircleV(at - new Vector2(size * 0.25f, size * 0.3f), size * 0.4f, Ui.Fade(Ui.Shade(skin, 1.12f), 0.6f));
+        }
+    }
+
+    /// <summary>A gun at the hip or aimed, as the pose places it; lowered to run, dipped while
+    /// it cycles, kicked by each shot, thrust in to bash.</summary>
+    private Placed GunPose(WeaponModel m, Gun gun, WeaponPose wp, int w, int h)
+    {
+        if (Hold is float held) return Place(m, wp, w, h, held);
+        Placed p = Place(m, wp, w, h, aim);
         float kick = gun.Kick * gun.Kick;
         float cycle = gun.Kind == Gun.Mode.Gun && gun.Cycle > 0
             ? MathF.Sin(Math.Clamp(1f - gun.Cycle / Math.Max(gun.CycleLength, 0.01f), 0, 1) * MathF.PI) : 0;
         float bash = gun.Swing >= 0 ? MathF.Sin(gun.Swing * MathF.PI) : 0;
-        // Everything turns about the grip.
-        Vector3 pivot = Vector3.Transform(grip3, pose);
-        Matrix4x4 around = Matrix4x4.CreateTranslation(-pivot)
-            * Turn(kick * (6f - aim * 3f) - cycle * 32f - sprint * 12f, sprint * 32f + bash * 18f, cycle * 22f - sprint * 18f + swayRoll + bash * -25f)
-            * Matrix4x4.CreateTranslation(pivot + new Vector3(-sprint * 0.04f - bash * 0.06f, -cycle * 0.09f - sprint * 0.05f, kick * 0.035f - bash * 0.12f));
-        return pose * around;
+        // Up, for this gun: the way its muzzle rises (pointing left, that is clockwise).
+        float rise = p.Mirror ? 1f : -1f;
+        float turn = p.Turn + rise * (kick * (7f - aim * 3f) - cycle * 24f - sprint * 34f + bash * 12f) + swayRoll;
+        float r = p.Turn * MathF.PI / 180f;
+        var back = -new Vector2(MathF.Cos(r), MathF.Sin(r)) * (p.Mirror ? -1f : 1f);
+        Vector2 at = p.At + back * kick * h * 0.035f
+            + new Vector2(sprint * w * 0.03f, (cycle * 0.08f + sprint * 0.08f) * h)
+            + new Vector2(-bash * w * 0.1f, -bash * h * 0.06f);
+        return p with { At = at, Turn = turn };
     }
 
-    /// <summary>A melee weapon held up as the player placed it (over the right shoulder unless
-    /// moved); a swing sweeps it down and across.</summary>
-    private Matrix4x4 MeleePose(WeaponModel m, Gun gun, WeaponPose wp)
+    /// <summary>A melee weapon held up as the pose places it; a swing sweeps it down and across.</summary>
+    private Placed MeleePose(WeaponModel m, Gun gun, WeaponPose wp, int w, int h)
     {
-        float scale = Math.Clamp(m.Length * 0.24f, 0.11f, 0.32f) / m.Length * wp.Size;
-        Matrix4x4 size = Matrix4x4.CreateScale(scale, scale, scale * wp.Depth);
-        var grip3 = new Vector3(GripOf(m, wp), 0);
-        float live = Hold == null ? 1f : 0f;
-        float t = gun.Swing >= 0 ? gun.Swing * live : 0;
+        Placed p = Place(m, wp, w, h, 0);
+        if (Hold != null) return p;
+        float t = gun.Swing >= 0 ? gun.Swing : 0;
         float eased = t * t * (3 - 2 * t);
-        float windup = t > 0 && t < 0.25f ? MathF.Sin(t / 0.25f * MathF.PI) * 8f : 0f;
-        float run = sprint * live;
-        float pitch = wp.Pitch + windup - eased * 95f - run * 20f;
-        float yaw = wp.Yaw + eased * 55f + run * 20f;
-        float roll = wp.Roll - eased * 40f + swayRoll * live;
-        var rest = new Vector3(wp.X, wp.Y, wp.Z);
-        Vector3 hand = Vector3.Lerp(rest, rest + new Vector3(-0.2f, -0.035f, -0.04f), eased) + new Vector3(0, -run * 0.04f, 0);
-        Matrix4x4 pose = size * Ahead * Turn(pitch, yaw, roll);
-        pose *= Matrix4x4.CreateTranslation(hand - Vector3.Transform(grip3, pose));
-        return pose;
-    }
-
-    private static Matrix4x4 Blend(Matrix4x4 a, Matrix4x4 b, float t)
-    {
-        if (t <= 0.001f) return a;
-        if (t >= 0.999f) return b;
-        Matrix4x4.Decompose(a, out Vector3 sa, out Quaternion ra, out Vector3 ta);
-        Matrix4x4.Decompose(b, out Vector3 sb, out Quaternion rb, out Vector3 tb);
-        float e = t * t * (3 - 2 * t);
-        return Matrix4x4.CreateScale(Vector3.Lerp(sa, sb, e)) * Matrix4x4.CreateFromQuaternion(Quaternion.Slerp(ra, rb, e)) * Matrix4x4.CreateTranslation(Vector3.Lerp(ta, tb, e));
-    }
-
-    /// <summary>A picture facing the eye at a view-space point, through the held shader.</summary>
-    private static void Sprite(Atlas atlas, Pic pic, Vector3 at, float size, Color color)
-    {
-        float h = size / 2f;
-        Rlgl.SetTexture(atlas.Texture(pic.R.Page).Id);
-        Rlgl.Begin((int)DrawMode.Quads);
-        Rlgl.Color4ub(color.R, color.G, color.B, 255);
-        Corner(pic, 0, 1, at + new Vector3(-h, -h, 0));
-        Corner(pic, 1, 1, at + new Vector3(h, -h, 0));
-        Corner(pic, 1, 0, at + new Vector3(h, h, 0));
-        Corner(pic, 0, 0, at + new Vector3(-h, h, 0));
-        Rlgl.End();
-        Rlgl.SetTexture(0);
-    }
-
-    private static void Corner(Pic pic, float u, float v, Vector3 p)
-    {
-        Vector2 t = pic.R.At(pic.Cut[0] + pic.CutW * u, pic.Cut[1] + pic.CutH * v);
-        Rlgl.TexCoord2f(t.X, t.Y);
-        Rlgl.Vertex3f(p.X, p.Y, p.Z);
+        float windup = t > 0 && t < 0.25f ? MathF.Sin(t / 0.25f * MathF.PI) : 0f;
+        // Anticlockwise from up-and-in, through the middle of the view, to down-and-across.
+        float turn = p.Turn - eased * 125f + windup * 12f + sprint * 25f + swayRoll;
+        Vector2 at = Vector2.Lerp(p.At, new Vector2(w * 0.46f, h * 0.9f), eased) + new Vector2(sprint * w * 0.03f, sprint * h * 0.06f);
+        return p with { At = at, Turn = turn };
     }
 
     /// <summary>The colonist's skin, and the colour of what they wear on their arms, outermost.</summary>
@@ -264,13 +271,8 @@ public sealed class Hands : IDisposable
         return (skin, sleeve);
     }
 
-    /// <summary>A new atlas: every model again.</summary>
-    public void Forget()
-    {
-        foreach (WeaponModel? m in models.Values) m?.Dispose();
-        models.Clear();
-        handPic = null;
-    }
+    /// <summary>A new atlas: every weapon looked at again.</summary>
+    public void Forget() => models.Clear();
 
     public void Dispose() => Forget();
 }

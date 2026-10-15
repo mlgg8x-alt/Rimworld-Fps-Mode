@@ -6,14 +6,17 @@ public static class Program
 {
     private const string Help = @"RimFpsClient: RimWorld FPS Mode's first-person client.
 
-Start it, then load a save in RimWorld with the RimWorld FPS Mode mod: draft a colonist and
-click ""Play in first person"". Settings live in " + "{0}" + @".
+The RimWorld FPS Mode mod starts it in the background with RimWorld; or start it, then load a
+save with the mod and turn on ""FPS mode"" on a colonist. Settings live in " + "{0}" + @".
 
   --demo              a made-up raid on a made-up colony, no RimWorld needed
   --address host:port where to listen for RimWorld (default 127.0.0.1:47820)
   --windowed          do not fill the screen when a colonist is handed over
   --keep-window       keep the window up while no colonist is played
   --size WxH          the window's size at start (default 1280x720)
+  --background        as the mod starts it: hidden until a colonist is played, logging to
+                      client.log beside the settings
+  --parent PID        close when this process (RimWorld) does
 
 For testing (with --demo): --screenshot file.png [--frames N] [--yaw D] [--pitch D]
   [--at x,z] [--sky 0..1] [--rain R] [--fog F] [--burning] [--menu] [--options] [--automap]
@@ -34,6 +37,8 @@ For testing (with --demo): --screenshot file.png [--frames N] [--yaw D] [--pitch
                 case "--address": settings.Address = Next(); break;
                 case "--windowed": settings.Fullscreen = false; break;
                 case "--keep-window": settings.OneWindow = false; break;
+                case "--background": launch.Background = true; settings.OneWindow = true; break;
+                case "--parent": launch.Parent = (int)Num(); break;
                 case "--screenshot": launch.Screenshot = Path.GetFullPath(Next()); break;
                 case "--frames": launch.Frames = (int)Num(); break;
                 case "--yaw": launch.Yaw = Num(); break;
@@ -69,6 +74,22 @@ For testing (with --demo): --screenshot file.png [--frames N] [--yaw D] [--pitch
                     Console.WriteLine($"unknown option {a}; --help lists them");
                     return 2;
             }
+        }
+        if (launch.Background)
+        {
+            // No console to write to: a log beside the settings, fresh each start.
+            try
+            {
+                string log = Path.Combine(Path.GetDirectoryName(Settings.Path)!, "client.log");
+                Directory.CreateDirectory(Path.GetDirectoryName(log)!);
+                var writer = new StreamWriter(log, false) { AutoFlush = true };
+                Console.SetOut(writer);
+                Console.SetError(writer);
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+            {
+            }
+            Console.WriteLine($"[fps] started by RimWorld (process {launch.Parent}) at {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
         }
         if (launch.Screenshot != null)
         {

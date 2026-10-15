@@ -5,33 +5,38 @@ using Raylib_cs;
 namespace RimFps.Game;
 
 /// <summary>
-/// A weapon to hold, made from nothing but its RimWorld picture, so every weapon works, modded
-/// ones too: the picture is the weapon seen from the side, kept flat and 2D, and turned in the
-/// view so perspective makes it read as solid; a thin stack of darker copies behind it gives
-/// it an edge. Where the hands go is read off its silhouette (the grip hangs below the body in
-/// the rear half, the barrel's underside takes the other hand, the muzzle is the far end), and
-/// the player can move all of it in the HUD's edit mode.
+/// A weapon to hold, as nothing but its RimWorld picture, drawn flat on the screen: every
+/// weapon works, modded ones too, with no model to make. RimWorld draws some pictures
+/// slanted (most melee weapons) and turns them straight by the def's equipped angle offset;
+/// this does the same to find which way the weapon points, its length along that way, and,
+/// from its outline, where the hands go (the grip hangs below the body in the rear half, the
+/// barrel's underside takes the other hand) and where the muzzle is (the far end).
 ///
-/// Model space: x runs from the weapon's back (0) to its tip (<see cref="Length"/>), as RimWorld
-/// draws weapons pointing east; y is up; z is across, the thickness. Units are cells.
+/// Points on the weapon are in its picture's own coordinates: 0 to 1 across the solid part,
+/// x right and y down, as the picture is stored.
 /// </summary>
-public sealed class WeaponModel : IDisposable
+public sealed class WeaponModel
 {
-    public readonly List<Mesh> Meshes = new();
-    /// <summary>Copies of the picture that make up its thickness.</summary>
-    private const int Layers = 28;
-    public int Page;
-    public float Length, Height, Thickness;
+    public Pic Pic = null!;
     public bool Melee;
-    public Vector2 Grip, Fore, Muzzle, Sight;
+    /// <summary>The solid part of the picture, in pixels.</summary>
+    public int W, H;
+    /// <summary>The way the weapon points in its picture, degrees clockwise from the right.</summary>
+    public float Angle;
+    /// <summary>Its length along that way, and its height across it, in RimWorld cells.</summary>
+    public float Length, Height;
+    /// <summary>Its length in the picture's pixels.</summary>
+    public float LengthPixels;
+    public Vector2 Grip, Fore, Muzzle;
     /// <summary>Two hands: the weapon is long enough to hold by its barrel too.</summary>
     public bool TwoHanded;
 
-    private const int Detail = 64;
+    private const int Detail = 96;
 
-    /// <summary>Builds the model of picture <paramref name="index"/>, drawn <paramref name="size"/>
-    /// cells across in RimWorld; null while the picture is not loaded.</summary>
-    public static WeaponModel? Build(Pictures pictures, int index, Vector2 size, bool melee)
+    /// <summary>The model of picture <paramref name="index"/>, drawn <paramref name="size"/>
+    /// cells across in RimWorld and turned <paramref name="turn"/> degrees (the def's
+    /// equipped angle offset) to point straight; null while the picture is not loaded.</summary>
+    public static WeaponModel? Build(Pictures pictures, int index, Vector2 size, bool melee, float turn)
     {
         Pic? pic = pictures.Get(index);
         if (pic == null) return null;
@@ -40,39 +45,89 @@ public sealed class WeaponModel : IDisposable
         var (pixels, w, h) = read.Value;
         bool Solid(int x, int y) => x >= 0 && y >= 0 && x < w && y < h && pixels[y * w + x].A >= 128;
 
+        // Which way it points in its picture. Guns are drawn pointing right, as RimWorld has
+        // them (turned by the def's offset, if any). Melee weapons are drawn every which way,
+        // mostly slanted: their long axis, read off the outline, towards the right (or up).
+        float angle = melee ? LongAxis(Solid, w, h) : -turn;
+        float a = angle * MathF.PI / 180f;
+        var along = new Vector2(MathF.Cos(a), MathF.Sin(a));
+        var across = new Vector2(-along.Y, along.X); // the weapon's underside
+        var centre = new Vector2(w / 2f, h / 2f);
+        float sMin = float.MaxValue, sMax = float.MinValue, tMin = float.MaxValue, tMax = float.MinValue;
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++)
+            {
+                if (!Solid(x, y)) continue;
+                var q = new Vector2(x + 0.5f, y + 0.5f) - centre;
+                float s = Vector2.Dot(q, along), t = Vector2.Dot(q, across);
+                sMin = Math.Min(sMin, s - 0.5f);
+                sMax = Math.Max(sMax, s + 0.5f);
+                tMin = Math.Min(tMin, t - 0.5f);
+                tMax = Math.Max(tMax, t + 0.5f);
+            }
+        if (sMax <= sMin) return null;
+        float perCell = w / Math.Max(0.05f, size.X * pic.CutW);
         var model = new WeaponModel
         {
-            Page = pic.R.Page,
+            Pic = pic,
             Melee = melee,
-            Length = Math.Max(0.05f, size.X * pic.CutW),
-            Height = Math.Max(0.02f, size.Y * pic.CutH),
+            W = w,
+            H = h,
+            Angle = angle,
+            LengthPixels = sMax - sMin,
+            Length = (sMax - sMin) / perCell,
+            Height = (tMax - tMin) / perCell,
         };
-        model.Thickness = Math.Clamp(model.Length * (melee ? 0.035f : 0.055f), 0.02f, 0.09f);
-        float L = model.Length, H = model.Height, t = model.Thickness / 2f;
-        // Picture pixel (x, y) (y down) to model space.
-        Vector2 At(float x, float y) => new(x / w * L, (1f - y / h) * H);
-        // The solid part of the picture in the atlas.
-        float cu0 = pic.Cut[0], cv0 = pic.Cut[1], cw = pic.CutW, ch = pic.CutH;
-        Vector2 Uv(float x, float y) => pic.R.At(cu0 + cw * Math.Clamp(x / w, 0f, 1f), cv0 + ch * Math.Clamp(y / h, 0f, 1f));
-
-        var builder = new MeshBuilder();
-        // The weapon stays RimWorld's flat picture, turned in the view so it reads as solid:
-        // the picture on both sides and a stack of darker copies between them, cut out the same
-        // way, which makes a clean edge of the right shape and colour without any blockiness.
-        for (int i = 0; i <= Layers; i++)
+        // The weapon straightened: (x, y) along it from the back and across it from the top.
+        int sw = Math.Max(1, (int)MathF.Ceiling(sMax - sMin)), sh = Math.Max(1, (int)MathF.Ceiling(tMax - tMin));
+        Vector2 Back(float x, float y) => centre + along * (sMin + x) + across * (tMin + y);
+        bool Straight(int x, int y)
         {
-            float z = -t + 2 * t * i / Layers;
-            bool side = i == 0 || i == Layers;
-            byte shade = (byte)(side ? (i == Layers ? 255 : 228) : 150 + 40 * Math.Abs(i - Layers / 2f) / (Layers / 2f));
-            var tint = new Color(shade, shade, shade, (byte)255);
-            builder.Quad(new(0, 0, z), new(L, 0, z), new(L, H, z), new(0, H, z), Uv(0, h), Uv(w, h), Uv(w, 0), Uv(0, 0), tint);
+            if (x < 0 || y < 0 || x >= sw || y >= sh) return false;
+            Vector2 q = Back(x + 0.5f, y + 0.5f);
+            return Solid((int)MathF.Floor(q.X), (int)MathF.Floor(q.Y));
         }
-        model.Meshes.AddRange(builder.Finish());
-        model.FindHands(Solid, w, h, At);
+        Vector2 ToPicture(float x, float y)
+        {
+            Vector2 q = Back(x, y);
+            return new Vector2(q.X / w, q.Y / h);
+        }
+        model.FindHands(Straight, sw, sh, ToPicture);
         return model;
     }
 
-    /// <summary>Where the hands and the muzzle are, from the silhouette.</summary>
+    /// <summary>The picture's long axis, degrees clockwise from the right, pointing right or up.</summary>
+    private static float LongAxis(Func<int, int, bool> solid, int w, int h)
+    {
+        double n = 0, mx = 0, my = 0;
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++)
+                if (solid(x, y))
+                {
+                    n++;
+                    mx += x;
+                    my += y;
+                }
+        if (n < 2) return 0;
+        mx /= n;
+        my /= n;
+        double xx = 0, yy = 0, xy = 0;
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++)
+                if (solid(x, y))
+                {
+                    xx += (x - mx) * (x - mx);
+                    yy += (y - my) * (y - my);
+                    xy += (x - mx) * (y - my);
+                }
+        float angle = (float)(0.5 * Math.Atan2(2 * xy, xx - yy) * 180 / Math.PI);
+        // Towards the right; straight up and down, upwards.
+        float dx = MathF.Cos(angle * MathF.PI / 180f), dy = MathF.Sin(angle * MathF.PI / 180f);
+        if (dx < -0.2f || MathF.Abs(dx) <= 0.2f && dy > 0) angle += 180f;
+        return angle;
+    }
+
+    /// <summary>Where the hands and the muzzle are, from the outline (straightened).</summary>
     private void FindHands(Func<int, int, bool> solid, int w, int h, Func<float, float, Vector2> at)
     {
         var topRow = new int[w];
@@ -96,9 +151,9 @@ public sealed class WeaponModel : IDisposable
             // A blade's handle is its back end: hold it a little way in.
             int hx = Math.Clamp((int)(w * 0.1f), 0, w - 1);
             Grip = at(hx + 0.5f, Middle(hx));
-            Fore = at(Math.Min(hx + 3, w - 1) + 0.5f, Middle(Math.Min(hx + 3, w - 1)));
+            int fx = Math.Clamp((int)(w * 0.24f), 0, w - 1);
+            Fore = at(fx + 0.5f, Middle(fx));
             Muzzle = at(last + 1, Middle(last));
-            Sight = Grip;
             TwoHanded = false;
             return;
         }
@@ -119,19 +174,6 @@ public sealed class WeaponModel : IDisposable
         int foreX = Math.Clamp(Math.Max(gripX + (int)(w * 0.25f), (int)(w * 0.6f)), 0, Math.Max(0, last - 2));
         Fore = at(foreX + 0.5f, bottomRow[foreX] >= 0 ? bottomRow[foreX] : body);
         Muzzle = at(last + 1, Middle(last));
-        int sightX = Math.Clamp(gripX, 0, w - 1);
-        Sight = at(sightX + 0.5f, topRow[sightX] >= 0 ? topRow[sightX] : 0);
         TwoHanded = Length > 0.7f;
-    }
-
-    public void Draw(Material material, Matrix4x4 transform)
-    {
-        foreach (Mesh mesh in Meshes) Raylib.DrawMesh(mesh, material, transform);
-    }
-
-    public void Dispose()
-    {
-        foreach (Mesh mesh in Meshes) Raylib.UnloadMesh(mesh);
-        Meshes.Clear();
     }
 }
