@@ -5,13 +5,13 @@ using RimWorld;
 using UnityEngine;
 using Verse;
 
-namespace RimWorldMW2
+namespace RimWorldFPS
 {
     /// <summary>
     /// M11: doors that open as you walk up, as they do in RimWorld. The played colonist standing
     /// next to a door tells that door a pawn is approaching, exactly as RimWorld's own pathing
     /// does, so RimWorld opens it, holds it and closes it again on its own terms. How far each
-    /// door has swung goes to IW4L as <c>doors</c>, which lets the MW2 player through once
+    /// door has swung goes to the client as <c>doors</c>, which lets the FPS player through once
     /// RimWorld says the way is clear.
     /// </summary>
     public static class DoorReport
@@ -42,7 +42,7 @@ namespace RimWorldMW2
             {
                 int swing = Swing(door);
                 // Every cell a door covers (M15: the 2 cell security door's second cell was left
-                // out, so MW2 showed it open).
+                // out, so the client showed it open).
                 foreach (IntVec3 cell in door.OccupiedRect())
                 {
                     if (!first) sb.Append(',');

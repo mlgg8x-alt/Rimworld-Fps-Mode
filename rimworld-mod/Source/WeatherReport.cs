@@ -7,20 +7,20 @@ using RimWorld;
 using UnityEngine;
 using Verse;
 
-namespace RimWorldMW2
+namespace RimWorldFPS
 {
     /// <summary>
-    /// M21: the weather and the mess on the ground, for MW2 to show. <c>weather</c> is how hard
+    /// M21: the weather and the mess on the ground, for the client to show. <c>weather</c> is how hard
     /// it rains and snows, how foggy and how windy the map in view is, as RimWorld blends one
     /// weather into the next; <c>filth</c> is every splotch of blood, firefoam, fuel, vomit,
-    /// ash, dirt and the rest near the MW2 player, each where RimWorld draws it. Each is sent
+    /// ash, dirt and the rest near the FPS player, each where RimWorld draws it. Each is sent
     /// when it changes, not more often than its interval.
     /// </summary>
     public static class WeatherReport
     {
         private const float WeatherSeconds = 1f;
         private const float FilthSeconds = 2f;
-        /// <summary>Cells around the MW2 player whose filth is sent (the engine draws 60).</summary>
+        /// <summary>Cells around the FPS player whose filth is sent (the engine draws 60).</summary>
         private const float FilthReach = 64f;
         private const int MaxFilth = 1500;
 
@@ -43,8 +43,11 @@ namespace RimWorldMW2
             WeatherManager weather = map.weatherManager;
             float lerp = weather.TransitionLerpFactor;
             float fog = Mathf.Lerp(Fogginess(weather.lastWeather), Fogginess(weather.curWeather), lerp);
+            // FPS fork: and how bright the sky is (RimWorld's sky glow, 0 night to 1 noon), so the
+            // client's outdoors darkens at night as RimWorld's does.
             string line = Json.Msg("weather").Num("rain", Tenth(weather.RainRate)).Num("snow", Tenth(weather.SnowRate))
-                .Num("fog", Tenth(fog)).Num("wind", Tenth(weather.CurWindSpeedFactor)).ToString();
+                .Num("fog", Tenth(fog)).Num("wind", Tenth(weather.CurWindSpeedFactor))
+                .Num("sky", Tenth(map.skyManager.CurSkyGlow)).ToString();
             if (line == sentWeather) return null;
             sentWeather = line;
             return line;
@@ -132,7 +135,7 @@ namespace RimWorldMW2
             }
             catch (Exception e)
             {
-                Log.WarningOnce("[RimWorldMW2] filth " + filth.def.defName + ": " + e.Message, filth.def.shortHash ^ 0x5f17);
+                Log.WarningOnce("[RimWorldFPS] filth " + filth.def.defName + ": " + e.Message, filth.def.shortHash ^ 0x5f17);
             }
             finally
             {

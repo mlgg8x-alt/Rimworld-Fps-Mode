@@ -5,13 +5,13 @@ using RimWorld;
 using UnityEngine;
 using Verse;
 
-namespace RimWorldMW2
+namespace RimWorldFPS
 {
     /// <summary>
     /// M10: colonists and raiders as RimWorld draws them. RimWorld renders each person facing
     /// north, east and south the way it draws them on the map, clothes, hair and all; those
-    /// pictures go to IW4L with the pawn (<c>art</c> and <c>draw</c>, as animals' already do),
-    /// which stands them up as cards instead of MW2 soldiers. A person is drawn again only
+    /// pictures go to the client with the pawn (<c>art</c> and <c>draw</c>, as animals' already do),
+    /// which stands them up as cards instead of the client soldiers. A person is drawn again only
     /// when their look changes, so the pictures are saved once each.
     /// </summary>
     public static class PawnArt
@@ -34,7 +34,7 @@ namespace RimWorldMW2
 
         /// <summary>New people drawn in one snapshot at most: a raid's arrive over a few
         /// snapshots rather than in one long stall (M15). M22: 8 left a big raid half drawn
-        /// for seconds, shown meanwhile as MW2 soldiers and boxes; now nobody is shown before
+        /// for seconds, shown meanwhile as the client soldiers and boxes; now nobody is shown before
         /// their picture, so it comes sooner.</summary>
         private const int NewPerSnapshot = 24;
         /// <summary>Seconds before trying again a person RimWorld could not draw.</summary>
@@ -58,7 +58,7 @@ namespace RimWorldMW2
         /// <summary>
         /// A person's own pictures on <paramref name="json"/>, as RimWorld draws them: facing
         /// north, east and south, cut out, and how many cells they span. False when there are
-        /// none yet: not drawn yet (IW4L shows nobody until then), or RimWorld could not draw
+        /// none yet: not drawn yet (the client shows nobody until then), or RimWorld could not draw
         /// their portrait (<see cref="CouldNotDraw"/>).
         /// </summary>
         public static bool Art(Pawn pawn, Json json)
@@ -127,7 +127,7 @@ namespace RimWorldMW2
             }
             catch
             {
-                // Someone RimWorld draws its own way (a mod): their MW2 soldier stays.
+                // Someone RimWorld draws its own way (a mod): their the client soldier stays.
                 return null;
             }
         }

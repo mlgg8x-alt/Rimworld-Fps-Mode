@@ -5,10 +5,10 @@ using RimWorld;
 using UnityEngine;
 using Verse;
 
-namespace RimWorldMW2
+namespace RimWorldFPS
 {
     /// <summary>
-    /// M20: RimWorld's lasting effects, for MW2 to show with its own: every fire burning on
+    /// M20: RimWorld's lasting effects, for the client to show with its own: every fire burning on
     /// the map in view (on the ground or on someone) as <c>fires</c>, and the gas hanging over
     /// it (smoke from smoke poppers and launchers, tox gas, rot stink, deadlife dust) as
     /// <c>gas</c>, a patch of <see cref="Patch"/> cells at a time. Each is sent when it changes,
@@ -69,7 +69,7 @@ namespace RimWorldMW2
                 Vector3 at = fire.parent != null && fire.parent.Spawned ? fire.parent.DrawPos : fire.Position.ToVector3Shifted();
                 if (!first) sb.Append(',');
                 first = false;
-                // A tenth of a cell and of a size is as fine as MW2 needs, and keeps the line
+                // A tenth of a cell and of a size is as fine as the client needs, and keeps the line
                 // the same while a fire flickers.
                 sb.Append("{\"x\":").Append(F(at.x)).Append(",\"z\":").Append(F(at.z))
                     .Append(",\"size\":").Append(F(fire.fireSize)).Append('}');

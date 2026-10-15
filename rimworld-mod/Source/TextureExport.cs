@@ -5,12 +5,12 @@ using System.Text;
 using UnityEngine;
 using Verse;
 
-namespace RimWorldMW2
+namespace RimWorldFPS
 {
     /// <summary>
-    /// M5: RimWorld's own art for IW4L. Copies a material's texture (or part of it) to a PNG,
+    /// M5: RimWorld's own art for the client. Copies a material's texture (or part of it) to a PNG,
     /// <see cref="Size"/> pixels square and tinted as RimWorld draws it, under RimWorld's save
-    /// data folder, once per art and colour. The files stay on this computer; IW4L reads them
+    /// data folder, once per art and colour. The files stay on this computer; the client reads them
     /// by the names in <see cref="Names"/>. Main thread only.
     /// </summary>
     public static class TextureExport
@@ -36,7 +36,7 @@ namespace RimWorldMW2
             {
                 if (dir == null)
                 {
-                    dir = Path.Combine(GenFilePaths.SaveDataFolderPath, "RimWorldMW2", "textures");
+                    dir = Path.Combine(GenFilePaths.SaveDataFolderPath, "RimWorldFPS", "textures");
                     Directory.CreateDirectory(dir);
                 }
                 return dir;
@@ -59,7 +59,7 @@ namespace RimWorldMW2
         /// The index of <paramref name="mat"/>'s art, saving it first if it is new: the whole
         /// texture, or for linked art the piece <paramref name="linked"/>, mirrored when
         /// <paramref name="flip"/>. A <paramref name="cutout"/> (a pawn, something on the ground)
-        /// is named <c>..._cut</c> so IW4L keeps its see-through parts; a <paramref name="floor"/>
+        /// is named <c>..._cut</c> so the client keeps its see-through parts; a <paramref name="floor"/>
         /// (ground art) <c>..._floor</c>, <see cref="FloorSize"/> square. -1 when it has none or
         /// it could not be read.
         /// </summary>
@@ -111,7 +111,7 @@ namespace RimWorldMW2
             }
             catch (Exception e)
             {
-                Log.WarningOnce("[RimWorldMW2] could not save texture " + key + ": " + e.Message, key.GetHashCode());
+                Log.WarningOnce("[RimWorldFPS] could not save texture " + key + ": " + e.Message, key.GetHashCode());
             }
             byKey[key] = index;
             return index;
@@ -136,7 +136,7 @@ namespace RimWorldMW2
 
         /// <summary>
         /// The index of a picture RimWorld just drew for us (a colonist's portrait), saved under
-        /// <paramref name="key"/> the first time; cut out, so IW4L keeps its see-through parts.
+        /// <paramref name="key"/> the first time; cut out, so the client keeps its see-through parts.
         /// -1 when it could not be read.
         /// </summary>
         public static int OfDrawn(RenderTexture drawn, string key)
@@ -163,7 +163,7 @@ namespace RimWorldMW2
             }
             catch (Exception e)
             {
-                Log.WarningOnce("[RimWorldMW2] could not save picture " + key + ": " + e.Message, key.GetHashCode());
+                Log.WarningOnce("[RimWorldFPS] could not save picture " + key + ": " + e.Message, key.GetHashCode());
             }
             byKey[key] = index;
             return index;

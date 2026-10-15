@@ -6,18 +6,18 @@ using HarmonyLib;
 using UnityEngine;
 using Verse;
 
-namespace RimWorldMW2
+namespace RimWorldFPS
 {
     /// <summary>
     /// M21: RimWorld's flecks (puffs of dust and smoke, sparks, splashes, footprints, blood
-    /// spurts) for MW2 to draw: each made on the map in view near the MW2 player is sent once,
-    /// as it starts, in a <c>flecks</c> batch each frame; MW2 moves, turns, grows and fades it
+    /// spurts) for the client to draw: each made on the map in view near the FPS player is sent once,
+    /// as it starts, in a <c>flecks</c> batch each frame; the client moves, turns, grows and fades it
     /// from there as RimWorld would.
     /// </summary>
     [HarmonyPatch(typeof(FleckManager), nameof(FleckManager.CreateFleck))]
     public static class FleckReport
     {
-        /// <summary>Cells from the MW2 player within which flecks are sent.</summary>
+        /// <summary>Cells from the FPS player within which flecks are sent.</summary>
         private const float Reach = 40f;
         /// <summary>Most flecks sent a frame; more are dropped (a big fire makes plenty).</summary>
         private const int MaxPerFrame = 80;
@@ -96,7 +96,7 @@ namespace RimWorldMW2
             }
             catch (Exception e)
             {
-                Log.WarningOnce("[RimWorldMW2] fleck " + fleckData.def?.defName + ": " + e.Message, 0x3f1e);
+                Log.WarningOnce("[RimWorldFPS] fleck " + fleckData.def?.defName + ": " + e.Message, 0x3f1e);
             }
         }
 

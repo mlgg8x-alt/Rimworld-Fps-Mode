@@ -4,15 +4,15 @@ using RimWorld;
 using UnityEngine;
 using Verse;
 
-namespace RimWorldMW2
+namespace RimWorldFPS
 {
     /// <summary>
-    /// M2: tells IW4L about every bullet fired on the map in view as it leaves the gun, so MW2
+    /// M2: tells the client about every bullet fired on the map in view as it leaves the gun, so the client
     /// can draw its tracer. RimWorld has already rolled the shot: a miss flies to a cell other
     /// than the one aimed at, and <c>destination</c> is where the bullet lands. M4: anything
     /// else fired (mortar shells, grenades, rockets) goes as a <c>shell</c>, with its time in
-    /// flight, so MW2 can fly it in and sound it coming. M8: each bullet carries its <c>id</c>,
-    /// so IW4L can say which strike the MW2 player (<see cref="DodgeableShots"/>).
+    /// flight, so the client can fly it in and sound it coming. M8: each bullet carries its <c>id</c>,
+    /// so the client can say which strike the FPS player (<see cref="DodgeableShots"/>).
     /// </summary>
     [HarmonyPatch(typeof(Projectile), nameof(Projectile.Launch), new[]
     {
@@ -21,7 +21,7 @@ namespace RimWorldMW2
     })]
     internal static class ShotReport
     {
-        /// <summary>Heights in cells, for MW2: about a soldier's shoulder and chest.</summary>
+        /// <summary>Heights in cells, for the client: about a soldier's shoulder and chest.</summary>
         private const float MuzzleHeight = 1.3f;
         private const float ImpactHeight = 1.0f;
 
@@ -30,14 +30,14 @@ namespace RimWorldMW2
         private static readonly AccessTools.FieldRef<Projectile, int> TicksToImpactOf =
             AccessTools.FieldRefAccess<Projectile, int>("ticksToImpact");
 
-        /// <summary>Sends lines to IW4L while connected; set by <see cref="BridgeGameComponent"/>.</summary>
+        /// <summary>Sends lines to the client while connected; set by <see cref="BridgeGameComponent"/>.</summary>
         internal static System.Action<string> Send;
 
         private static void Postfix(Projectile __instance, Thing launcher, Vector3 origin, LocalTargetInfo usedTarget,
             LocalTargetInfo intendedTarget, Thing equipment)
         {
             if (Send == null || __instance.Map == null) return;
-            // The MW2 player's own bullets came from MW2 in the first place.
+            // the FPS player's own bullets came from the client in the first place.
             if (PlayerShots.IsLookAlike(__instance)) return;
             if (__instance.Map != PawnSnapshot.MapInView()) return;
             Vector3 to = DestinationOf(__instance);
@@ -68,7 +68,7 @@ namespace RimWorldMW2
                 return;
             }
             bool hit = usedTarget.HasThing && usedTarget.Thing == intendedTarget.Thing;
-            // M8: IW4L says which of these strike the colonist it plays (DodgeableShots).
+            // M8: the client says which of these strike the colonist it plays (DodgeableShots).
             DodgeableShots.Launched(__instance, launcher, origin, to);
             float speed = __instance.def.projectile.SpeedTilesPerTick * 60f * Find.TickManager.TickRateMultiplier;
             var json = Json.Msg("shot")

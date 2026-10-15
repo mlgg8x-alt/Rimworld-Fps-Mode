@@ -5,31 +5,31 @@ using RimWorld;
 using UnityEngine;
 using Verse;
 
-namespace RimWorldMW2
+namespace RimWorldFPS
 {
     /// <summary>
-    /// M2: the colonist the MW2 player plays as. M12: only the one the player chose with
-    /// "Control in MW2" on a drafted colonist (<see cref="ControlGizmo"/>); choosing it again,
-    /// undrafting it, or it going down hands MW2 back to nobody, and RimWorld stays in front.
-    /// It moves cell by cell in RimWorld but is drawn gliding after the MW2 player.
+    /// M2: the colonist the FPS player plays as. M12: only the one the player chose with
+    /// "Play in first person" on a drafted colonist (<see cref="ControlGizmo"/>); choosing it again,
+    /// undrafting it, or it going down hands the client back to nobody, and RimWorld stays in front.
+    /// It moves cell by cell in RimWorld but is drawn gliding after the FPS player.
     /// Read and changed on the main thread only.
     /// </summary>
     public static class PlayerPawn
     {
         private static Pawn current;
-        /// <summary>The played colonist's own "fire at will", given back when MW2 lets go of it:
-        /// while played, only the MW2 player shoots.</summary>
+        /// <summary>The played colonist's own "fire at will", given back when the client lets go of it:
+        /// while played, only the FPS player shoots.</summary>
         private static bool currentFireAtWill;
 
-        /// <summary>Where the MW2 player is (or as far as RimWorld let the pawn go), and where the
+        /// <summary>Where the FPS player is (or as far as RimWorld let the pawn go), and where the
         /// pawn is drawn, gliding after it; x and z only.</summary>
         private static Vector3 target;
         private static Vector3? shown;
         private static int shownFrame = -1;
-        /// <summary>How quickly the drawn pawn closes on the MW2 player, per second.</summary>
+        /// <summary>How quickly the drawn pawn closes on the FPS player, per second.</summary>
         private const float GlideRate = 15f;
 
-        /// <summary>The pawn MW2 plays on <paramref name="map"/>, or null.</summary>
+        /// <summary>The pawn the client plays on <paramref name="map"/>, or null.</summary>
         public static Pawn Current(Map map)
         {
             if (current == null || Playable(current, map)) return current;
@@ -37,10 +37,10 @@ namespace RimWorldMW2
             return null;
         }
 
-        /// <summary>Whether MW2 plays <paramref name="pawn"/> now.</summary>
+        /// <summary>Whether the client plays <paramref name="pawn"/> now.</summary>
         public static bool Controls(Pawn pawn) => pawn != null && pawn == current;
 
-        /// <summary>"Control in MW2": MW2 plays <paramref name="pawn"/> from now on, and comes to
+        /// <summary>"Play in first person": the client plays <paramref name="pawn"/> from now on, and comes to
         /// the front.</summary>
         public static void Control(Pawn pawn)
         {
@@ -53,16 +53,16 @@ namespace RimWorldMW2
                 currentFireAtWill = pawn.drafter.FireAtWill;
                 pawn.drafter.FireAtWill = false;
             }
-            Log.Message($"[RimWorldMW2] MW2 now plays {pawn.LabelShort}");
-            RimView.ToMw2();
+            Log.Message($"[RimWorldFPS] the client now plays {pawn.LabelShort}");
+            RimView.ToClient();
         }
 
-        /// <summary>MW2 lets go of the colonist it plays; RimWorld stays in front.</summary>
+        /// <summary>The client lets go of the colonist it plays; RimWorld stays in front.</summary>
         public static void Release()
         {
             if (current == null) return;
             if (current.drafter != null) current.drafter.FireAtWill = currentFireAtWill;
-            Log.Message($"[RimWorldMW2] MW2 no longer plays {current.LabelShort}");
+            Log.Message($"[RimWorldFPS] the client no longer plays {current.LabelShort}");
             current = null;
             shown = null;
         }
@@ -72,9 +72,9 @@ namespace RimWorldMW2
             && pawn.Faction == Faction.OfPlayer;
 
         /// <summary>
-        /// A <c>player_move</c>: walk the pawn towards the MW2 player one cell at a time, stopping
-        /// at anything a colonist couldn't walk through. When the pawn is held back, IW4L sees
-        /// the gap in the next snapshot and puts the MW2 player back on the pawn.
+        /// A <c>player_move</c>: walk the pawn towards the FPS player one cell at a time, stopping
+        /// at anything a colonist couldn't walk through. When the pawn is held back, the client sees
+        /// the gap in the next snapshot and puts the FPS player back on the pawn.
         /// </summary>
         public static void Move(string id, float x, float z, float yaw)
         {
@@ -97,14 +97,14 @@ namespace RimWorldMW2
                 pawn.Notify_Teleported(false, true);
             }
             pawn.Rotation = Facing(pawn.Rotation, yaw);
-            // Drawn where the MW2 player is, or in the middle of the cell RimWorld held it in.
+            // Drawn where the FPS player is, or in the middle of the cell RimWorld held it in.
             target = cell == goal ? new Vector3(x, 0f, z) : cell.ToVector3Shifted();
         }
 
         /// <summary>Degrees past the half way mark between two facings before the pawn turns.</summary>
         private const float TurnMargin = 12f;
 
-        /// <summary>The way the pawn faces for MW2's <paramref name="yaw"/>, kept while the yaw
+        /// <summary>The way the pawn faces for the client's <paramref name="yaw"/>, kept while the yaw
         /// is near the edge of it (M19: looking about half way between two ways flipped the
         /// colonist's picture back and forth, a flicker on the minimap).</summary>
         internal static Rot4 Facing(Rot4 now, float yaw)
@@ -115,7 +115,7 @@ namespace RimWorldMW2
 
         private static IntVec3 CellAt(float x, float z) => new IntVec3((int)Math.Floor(x), 0, (int)Math.Floor(z));
 
-        /// <summary>The played pawn's drawn x and z, gliding towards the MW2 player once per frame.</summary>
+        /// <summary>The played pawn's drawn x and z, gliding towards the FPS player once per frame.</summary>
         internal static bool TryDrawn(Pawn pawn, Vector3 drawn, out Vector3 at)
         {
             at = drawn;

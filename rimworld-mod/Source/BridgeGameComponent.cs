@@ -2,25 +2,25 @@ using RimWorld;
 using UnityEngine;
 using Verse;
 
-namespace RimWorldMW2
+namespace RimWorldFPS
 {
     /// <summary>
     /// Main-thread side of the bridge. RimWorld creates one per game automatically.
     /// M0: send hello on connect and a tick counter once per second; log anything received.
     /// M1: send a pawn snapshot about ten times a second, paused or not.
-    /// M2: move the colonist MW2 plays (<see cref="PlayerPawn"/>) where MW2 says, report every
-    /// bullet fired (<see cref="ShotReport"/>) and fire the MW2 player's (<see cref="PlayerShots"/>).
+    /// M2: move the colonist the client plays (<see cref="PlayerPawn"/>) where the client says, report every
+    /// bullet fired (<see cref="ShotReport"/>) and fire the FPS player's (<see cref="PlayerShots"/>).
     /// M3: send the map's terrain (<see cref="TerrainReport"/>).
-    /// M4: send what the played colonist can loot and apply MW2's looting (<see cref="LootReport"/>).
+    /// M4: send what the played colonist can loot and apply the client's looting (<see cref="LootReport"/>).
     /// M5: send roofs, wall and floor art, and everything built (<see cref="WorldReport"/>).
-    /// M8: the played colonist is struck only by bullets MW2 says met the player (<see cref="DodgeableShots"/>).
-    /// M9: RimWorld's camera follows the MW2 player and feeds MW2's minimap; Tab switches between
+    /// M8: the played colonist is struck only by bullets the client says met the player (<see cref="DodgeableShots"/>).
+    /// M9: RimWorld's camera follows the FPS player and feeds the client's minimap; Tab switches between
     /// the two games' windows (<see cref="RimView"/>).
     /// M10: people are drawn as RimWorld draws them (<see cref="PawnArt"/>) and what grows carries
     /// RimWorld's own pictures (<see cref="FloraReport"/>).
     /// M11: doors open as the played colonist walks up to them (<see cref="DoorReport"/>).
-    /// M12: RimWorld is where the game lives: "Control in MW2" on a drafted colonist hands them
-    /// to MW2 (<see cref="ControlGizmo"/>); E in MW2 opens doors and flicks switches
+    /// M12: RimWorld is where the game lives: "Play in first person" on a drafted colonist hands them
+    /// to the client (<see cref="ControlGizmo"/>); E in the client opens doors and flicks switches
     /// (<see cref="Activate"/>); people flash when hurt (<see cref="Hurt"/>).
     /// </summary>
     public class BridgeGameComponent : GameComponent
@@ -44,7 +44,7 @@ namespace RimWorldMW2
             client = null;
         }
 
-        /// <summary>IW4L is connected.</summary>
+        /// <summary>The client is connected.</summary>
         internal static bool Linked => client != null && client.Connected;
 
         public override void FinalizeInit()
@@ -88,7 +88,7 @@ namespace RimWorldMW2
             if (client == null) return;
             DrainStatus();
             // Everything but the tick goes from here, not from ticks, so it keeps flowing while
-            // RimWorld is paused (it pauses itself on loading a save): MW2 still sees the pawns,
+            // RimWorld is paused (it pauses itself on loading a save): the client still sees the pawns,
             // the map and who is drafted, and still moves its colonist.
             if (!client.Connected)
             {
@@ -154,13 +154,13 @@ namespace RimWorldMW2
 
         /// <summary>
         /// RimWorld pauses when its window loses focus unless "Run in background" is on, and
-        /// playing in MW2 always takes focus away. Turned on once while the bridge is connected.
+        /// playing in the client always takes focus away. Turned on once while the bridge is connected.
         /// </summary>
         private static void KeepRunningInBackground()
         {
             if (Prefs.RunInBackground) return;
             Prefs.RunInBackground = true;
-            Log.Message("[RimWorldMW2] turned on Options > Run in background so RimWorld keeps running while MW2 has focus");
+            Log.Message("[RimWorldFPS] turned on Options > Run in background so RimWorld keeps running while the client has focus");
         }
 
         private void Handle(string line)
@@ -186,7 +186,11 @@ namespace RimWorldMW2
                     break;
                 case "hello":
                     RimView.Window(message.Str("window"));
-                    Log.Message($"[RimWorldMW2] <- {line}");
+                    Log.Message($"[RimWorldFPS] <- {line}");
+                    break;
+                case "player_melee":
+                    if (message.Str("pawn") != null && message.Str("target") != null)
+                        PlayerMelee.Strike(message.Str("pawn"), message.Str("target"));
                     break;
                 case "player_throw":
                     float[] at = message.Nums("to");
@@ -214,7 +218,7 @@ namespace RimWorldMW2
                         LootReport.Drop(message.Str("pawn"), message.Str("item"));
                     break;
                 default:
-                    Log.Message($"[RimWorldMW2] <- {line}");
+                    Log.Message($"[RimWorldFPS] <- {line}");
                     break;
             }
         }
@@ -222,7 +226,7 @@ namespace RimWorldMW2
         private void DrainStatus()
         {
             while (client.StatusMessages.TryDequeue(out var status))
-                Log.Message($"[RimWorldMW2] bridge {status}");
+                Log.Message($"[RimWorldFPS] bridge {status}");
         }
     }
 }

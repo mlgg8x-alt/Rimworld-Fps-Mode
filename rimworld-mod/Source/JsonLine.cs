@@ -2,10 +2,10 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Text;
 
-namespace RimWorldMW2
+namespace RimWorldFPS
 {
     /// <summary>
-    /// Tiny reader for the flat protocol messages IW4L sends. Top-level strings, numbers and
+    /// Tiny reader for the flat protocol messages the client sends. Top-level strings, numbers and
     /// booleans become entries; nested arrays and objects are kept as their JSON text, and
     /// <see cref="Nums"/> reads an array of numbers.
     /// </summary>

@@ -5,12 +5,12 @@ using RimWorld;
 using UnityEngine;
 using Verse;
 
-namespace RimWorldMW2
+namespace RimWorldFPS
 {
     /// <summary>
     /// M10: RimWorld's own art for what grows. <see cref="TerrainReport"/> already says where
     /// every tree and bush stands and what kind it is; this says what each kind looks like
-    /// (<c>plant_art</c>), so IW4L can stand RimWorld's own pictures there instead of MW2's
+    /// (<c>plant_art</c>), so the client can stand RimWorld's own pictures there instead of the client's
     /// tree models. Grass is not sent plant by plant (a map has tens of thousands): the grassy
     /// cells of <c>terrain</c> carry it, and the <c>grass</c> kind here says what it looks like.
     /// Sent when a kind's pictures are first seen, checked once a second of real time.

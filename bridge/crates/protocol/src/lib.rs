@@ -53,6 +53,15 @@ pub enum Message {
         /// RimWorld is paused (M18): MW2 holds its player still, view and all.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         paused: bool,
+        /// FPS fork: the played colonist's summary health, 0 to 1, for the status bar.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        player_health: Option<f32>,
+        /// FPS fork: the played colonist's sharp armour rating (0 to 2), for the status bar.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        player_armor: Option<f32>,
+        /// FPS fork: what the played colonist holds, RimWorld's label for it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        player_weapon: Option<String>,
     },
     /// A shot RimWorld already resolved, sent as its bullet leaves the gun; IW4L only renders
     /// it. `from` and `to` are `[x, height, z]` in cells, `to` where the bullet lands.
@@ -204,6 +213,9 @@ pub enum Message {
         fog: f32,
         #[serde(default)]
         wind: f32,
+        /// FPS fork: how bright the sky is, RimWorld's sky glow: 0 night to 1 noon.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sky: Option<f32>,
     },
     /// The filth near the MW2 player on the map in view (M21): blood, firefoam, fuel, vomit,
     /// ash, dirt and the rest, each splotch where RimWorld draws it: its picture (`tex`, a
@@ -258,6 +270,10 @@ pub enum Message {
     /// `to` (`[x, z]` in cells), where they aimed on the ground: RimWorld throws it there, as
     /// that colonist throws it, and it flies, lands and goes off as RimWorld's own.
     PlayerThrow { pawn: String, to: [f32; 2] },
+    /// FPS fork: the played colonist `pawn` attacks `target` in melee (fire with a melee
+    /// weapon or bare hands, at the pawn in front): RimWorld makes the attack with the
+    /// colonist's own melee verbs, rolling the hit, damage and cooldown, if it is in reach.
+    PlayerMelee { pawn: String, target: String },
     /// Take `item` (an id from the latest `loot`'s `nearby`) for the played colonist `pawn`
     /// (M4+), as RimWorld would: a weapon goes in hand (the one held drops), apparel is worn
     /// (what it replaces drops), anything else is carried, as much as the colonist can.
@@ -405,7 +421,10 @@ pub mod roof {
 #[serde(rename_all = "snake_case")]
 pub enum Side {
     Rimworld,
+    /// The original MW2 engine side (RimWorld x MW2).
     Iw4l,
+    /// FPS fork: the boomer shooter client (`boomer/`).
+    Boomer,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -649,6 +668,9 @@ pub struct GunTiming {
     /// throws it with fire or G ([`Message::PlayerThrow`]), not as a gun.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub throw: Option<f32>,
+    /// FPS fork: how far the gun shoots, in cells; the client's bullets go no further.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub range: Option<f32>,
 }
 
 /// Something a pawn carries (M15): its picture (a cut-out index into `textures`; a person's

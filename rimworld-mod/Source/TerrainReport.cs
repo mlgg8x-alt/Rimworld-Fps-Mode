@@ -5,10 +5,10 @@ using RimWorld;
 using UnityEngine;
 using Verse;
 
-namespace RimWorldMW2
+namespace RimWorldFPS
 {
     /// <summary>
-    /// M3: tells IW4L what stands on every cell of the map in view, one character a cell (the
+    /// M3: tells the client what stands on every cell of the map in view, one character a cell (the
     /// codes are in protocol/PROTOCOL.md), so it can build the map in blocks, and every tree and
     /// bush on it (<c>plants</c>), so it can stand a model on each. Sent when the bridge
     /// connects, when the map in view changes and when anything changes; checked once a second
@@ -71,7 +71,7 @@ namespace RimWorldMW2
             return sb.ToString();
         }
 
-        /// <summary>What stands on the cell, unless it is still being built (a frame): IW4L leaves those out.</summary>
+        /// <summary>What stands on the cell, unless it is still being built (a frame): the client leaves those out.</summary>
         public static Building Edifice(IntVec3 cell, Map map)
         {
             Building edifice = map.edificeGrid[cell];

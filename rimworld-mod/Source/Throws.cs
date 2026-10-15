@@ -4,13 +4,13 @@ using UnityEngine;
 using Verse;
 using Verse.Sound;
 
-namespace RimWorldMW2
+namespace RimWorldFPS
 {
     /// <summary>
-    /// M20: the played colonist's grenades, thrown from MW2. Fire or G there sends a
+    /// M20: the played colonist's grenades, thrown from the client. Fire or G there sends a
     /// <c>player_throw</c> with where the player aimed on the ground; the colonist throws one
     /// there at once, RimWorld's own grenade with its own sound, which flies, lands and goes
-    /// off as any other (MW2 already waited RimWorld's aiming and cooldown time between
+    /// off as any other (the client already waited RimWorld's aiming and cooldown time between
     /// throws, as it does between a gun's bursts).
     /// </summary>
     public static class Throws
@@ -50,7 +50,7 @@ namespace RimWorldMW2
             thrown.Launch(pawn, from, cell, cell, ProjectileHitFlags.NonTargetWorld, false, weapon);
             verb.verbProps.soundCast?.PlayOneShot(new TargetInfo(pawn.Position, map));
             pawn.records?.Increment(RecordDefOf.ShotsFired);
-            Log.Message($"[RimWorldMW2] {pawn.LabelShort} throws {projectile.label} at {cell}");
+            Log.Message($"[RimWorldFPS] {pawn.LabelShort} throws {projectile.label} at {cell}");
         }
     }
 }

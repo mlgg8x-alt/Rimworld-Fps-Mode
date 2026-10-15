@@ -1,7 +1,7 @@
 using System.Globalization;
 using System.Text;
 
-namespace RimWorldMW2
+namespace RimWorldFPS
 {
     /// <summary>
     /// Tiny JSON writer for protocol v0 messages. Hand-rolled so the mod needs no extra DLL.

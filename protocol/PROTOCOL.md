@@ -1,5 +1,9 @@
 # Bridge protocol v0
 
+This is upstream RimWorld x MW2's protocol, unchanged except for the additions in
+[FPS fork additions](#fps-fork-additions) at the end. "IW4L" below is the 3D side, which in
+this fork is the boomer client (`boomer/`); "the MW2 player" is the first-person player.
+
 One TCP connection on localhost (default `127.0.0.1:47820`). **IW4L listens, RimWorld connects**
 and retries every 2 seconds, so either game can start first.
 
@@ -73,3 +77,15 @@ map one cell is two blocks across (from M6; one before) and heights stay in bloc
 units, about half an MW2 soldier's height). Map origin is the middle of the map, and RimWorld north is map +Y.
 A sprinting MW2 player moves as fast as an uninjured drafted colonist walking to a point (4.6 cells a second),
 slower through trees as RimWorld's pathing is.
+
+## FPS fork additions
+
+All additive: the original IW4L side ignores fields and messages it does not know.
+
+| `t` | Direction | Meaning |
+|---|---|---|
+| `hello` | client → RW | `side` is `boomer` for the FPS client |
+| `snapshot` | RW → client | While a colonist is played: `player_health` (RimWorld's summary health, 0 to 1), `player_armor` (sharp armour rating, 0 to 2) and `player_weapon` (the held weapon's label), for the status bar; `player_gun.range`, how far the gun shoots in cells (the client's bullets go no further) |
+| `weather` | RW → client | `sky`: RimWorld's sky glow, 0 night to 1 noon. The client darkens the open sky and outdoors by it |
+| `player_shot` | client → RW | `damage` is optional now: RimWorld deals the colonist's own bullet damage (and its extra damage) for a hit, rolled as RimWorld rolls it; `damage` is used only for a gun without a bullet |
+| `player_melee` | client → RW | The played colonist `pawn` attacks `target` in melee (fire with a melee weapon or bare hands, at the pawn in front). RimWorld makes the attack with the colonist's own melee verbs (hit chance, damage, body part, cooldown), only when `target` is in reach |

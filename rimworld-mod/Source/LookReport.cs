@@ -5,10 +5,10 @@ using RimWorld;
 using UnityEngine;
 using Verse;
 
-namespace RimWorldMW2
+namespace RimWorldFPS
 {
     /// <summary>
-    /// M7: how each person on the map in view looks, so IW4L can dress its MW2 soldier the
+    /// M7: how each person on the map in view looks, so the client can dress its the client soldier the
     /// same: skin and hair colour and what they wear, outermost last. Sent as <c>looks</c>
     /// when anyone's changes, checked once a second of real time.
     /// </summary>

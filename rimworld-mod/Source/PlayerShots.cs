@@ -6,17 +6,19 @@ using UnityEngine;
 using Verse;
 using Verse.Sound;
 
-namespace RimWorldMW2
+namespace RimWorldFPS
 {
     /// <summary>
-    /// M2: the MW2 player's bullets. Each one is shown in RimWorld as the played colonist's own
-    /// bullet flying where MW2 sent it (a harmless look-alike), and a hit damages the pawn MW2
+    /// M2: the FPS player's bullets. Each one is shown in RimWorld as the played colonist's own
+    /// bullet flying where the client sent it (a harmless look-alike), and a hit damages the pawn the client
     /// struck, as the colonist's gun would. Only while RimWorld runs: nothing happens paused.
+    /// FPS fork: a hit deals the gun's own bullet damage, as RimWorld rolls it, not a scaled
+    /// MW2 number; the client's <c>damage</c> is only used for a gun without a bullet.
     /// </summary>
     public static class PlayerShots
     {
-        /// <summary>MW2's damage for a hit, times this, is RimWorld's. An MW2 M4 does about 30 up
-        /// close, so about 9 here, near RimWorld's assault rifle (11).</summary>
+        /// <summary>The client's damage for a hit, times this, when the gun has no bullet of its
+        /// own to take the damage from.</summary>
         public const float DamageScale = 0.3f;
 
         /// <summary>Look-alike bullets in flight: they land without touching anything.</summary>
@@ -37,17 +39,29 @@ namespace RimWorldMW2
             Thing gun = shooter.equipment?.Primary;
             VerbProperties verb = gun?.def?.Verbs?.FirstOrDefault();
             ShowBullet(shooter, gun, verb, from, to, map);
-            if (target == null || damage <= 0f) return;
+            if (target == null) return;
             Pawn victim = map.mapPawns.AllPawnsSpawned.FirstOrDefault(p => p.ThingID == target);
             if (victim == null || victim.Dead) return;
-            float armorPenetration = verb?.defaultProjectile?.projectile?.GetArmorPenetration(gun) ?? 0.15f;
+            ProjectileProperties bullet = verb?.defaultProjectile?.projectile;
+            float amount = bullet != null && gun != null ? bullet.GetDamageAmount(gun) : damage * DamageScale;
+            if (amount <= 0f) return;
+            float armorPenetration = bullet?.GetArmorPenetration(gun) ?? 0.15f;
+            float angle = (victim.Position - shooter.Position).AngleFlat;
             BodyPartRecord struck = Part(victim, part);
-            var hit = new DamageInfo(DamageDefOf.Bullet, Mathf.Max(1f, damage * DamageScale), armorPenetration,
-                (victim.Position - shooter.Position).AngleFlat, shooter, struck, gun?.def, intendedTarget: victim);
+            var hit = new DamageInfo(bullet?.damageDef ?? DamageDefOf.Bullet, Mathf.Max(1f, amount), armorPenetration,
+                angle, shooter, struck, gun?.def, intendedTarget: victim);
             victim.TakeDamage(hit);
+            // As RimWorld's own bullet: its extra damage (an EMP round's, a charge lance's burn).
+            if (bullet?.extraDamages == null) return;
+            foreach (ExtraDamage extra in bullet.extraDamages)
+            {
+                if (victim.Dead || !Rand.Chance(extra.chance)) continue;
+                victim.TakeDamage(new DamageInfo(extra.def, extra.amount, extra.AdjustedArmorPenetration(), angle,
+                    shooter, struck, gun?.def, intendedTarget: victim));
+            }
         }
 
-        /// <summary>Where on <paramref name="victim"/> MW2's bullet struck (M18), as RimWorld's
+        /// <summary>Where on <paramref name="victim"/> the client's bullet struck (M18), as RimWorld's
         /// body part: <c>head</c> one of the head's outer parts (head, eyes, ears, nose, jaw),
         /// <c>neck</c> the neck, <c>upper</c> the chest, shoulders or arms, <c>lower</c> the
         /// belly or hands, <c>legs</c> the legs and feet. Chosen by size, as RimWorld picks among the

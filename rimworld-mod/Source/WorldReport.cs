@@ -7,10 +7,10 @@ using RimWorld;
 using UnityEngine;
 using Verse;
 
-namespace RimWorldMW2
+namespace RimWorldFPS
 {
     /// <summary>
-    /// M5: what IW4L needs to build the map in view as RimWorld draws it, beyond
+    /// M5: what the client needs to build the map in view as RimWorld draws it, beyond
     /// <see cref="TerrainReport"/>'s cells: the roofs (<c>roofs</c>), the art of walls and floors
     /// (<c>skins</c>), everything else built (<c>buildings</c>), what lies on the ground
     /// (<c>items</c>), and the art they use (<c>textures</c>, saved by <see cref="TextureExport"/>).
@@ -43,7 +43,7 @@ namespace RimWorldMW2
 
         /// <summary>
         /// The <c>textures</c> line when art was saved since the last one, else null. Sent
-        /// before anything naming the new art, so IW4L never meets an index it lacks (M13: a
+        /// before anything naming the new art, so the client never meets an index it lacks (M13: a
         /// pawn's new picture showed as its old look until the next world check).
         /// </summary>
         public static string NewTextures()
@@ -111,7 +111,7 @@ namespace RimWorldMW2
         /// <summary>
         /// M17: what it costs a pawn to walk into each cell, in <c>terrain</c>'s order: RimWorld's
         /// own path cost (ground, what stands there, snow) as <c>'0'</c> plus ticks, capped at
-        /// 1000, and <c>'0'</c> plus 1001 where pawns cannot go. IW4L slows the player as much.
+        /// 1000, and <c>'0'</c> plus 1001 where pawns cannot go. The client slows the player as much.
         /// </summary>
         private static string Costs(Map map)
         {
@@ -152,7 +152,7 @@ namespace RimWorldMW2
 
         private static char Skin(int index) => index < 0 || index > MaxSkin ? '.' : (char)('0' + index);
 
-        /// <summary>The art of each cell's wall, door or smoothed rock; natural rock keeps MW2's.</summary>
+        /// <summary>The art of each cell's wall, door or smoothed rock; natural rock keeps the client's.</summary>
         private static string Walls(Map map)
         {
             var sb = new StringBuilder(map.Size.x * map.Size.z);
@@ -171,14 +171,14 @@ namespace RimWorldMW2
                     bool linked = graphic is Graphic_Linked;
                     Material mat = linked ? graphic.MatSingleFor(edifice) : graphic.MatAt(edifice.Rotation, edifice);
                     sb.Append(Skin(TextureExport.Of(mat, linked ? TextureExport.AllLinked : -1)));
-                    // Its front face, which IW4L puts on the wall's sides.
+                    // Its front face, which the client puts on the wall's sides.
                     if (linked) TextureExport.Of(mat, TextureExport.FaceLinked);
                 }
             return sb.ToString();
         }
 
-        /// <summary>The art of every cell's ground; water keeps MW2's. M16: saved whole
-        /// (<c>..._floor</c>), the most common ground first, as IW4L keeps the first few whole
+        /// <summary>The art of every cell's ground; water keeps the client's. M16: saved whole
+        /// (<c>..._floor</c>), the most common ground first, as the client keeps the first few whole
         /// and the rest cut down.</summary>
         private static string Floors(Map map)
         {
@@ -193,7 +193,7 @@ namespace RimWorldMW2
             foreach (var pair in counts.OrderByDescending(p => p.Value))
             {
                 // Every kind of ground but water: RimWorld's own art, so its soil, sand
-                // and stone look like RimWorld's rather than MW2's (M10).
+                // and stone look like RimWorld's rather than the client's (M10).
                 TerrainDef ground = pair.Key;
                 bool water = ground.IsWater;
                 cache[ground] = !water && ground.graphic != null ? Skin(TextureExport.Of(ground.graphic.MatSingle, floor: true)) : '.';
@@ -211,7 +211,7 @@ namespace RimWorldMW2
         /// <summary>
         /// M12: how brightly lamps light each roofed cell, one hex digit a cell in terrain
         /// order: RimWorld's own glow grid without daylight, <c>f</c> from where RimWorld counts
-        /// a cell as lit (half glow) up. Open sky is <c>0</c>; IW4L lights it fully anyway.
+        /// a cell as lit (half glow) up. Open sky is <c>0</c>; the client lights it fully anyway.
         /// </summary>
         private static string Glow(Map map)
         {
@@ -256,7 +256,7 @@ namespace RimWorldMW2
                     tex = TextureExport.Of(mat, linked ? TextureExport.AllLinked : -1, flip);
                 }
                 catch { tex = -1; }
-                // Art: IW4L cuts its body from its picture (M15, M16).
+                // Art: the client cuts its body from its picture (M15, M16).
                 int card = -1;
                 if (!linked && Upright(def))
                 {
@@ -331,7 +331,7 @@ namespace RimWorldMW2
         };
 
         /// <summary>
-        /// Whether a building is art whose body IW4L cuts from its picture (statues,
+        /// Whether a building is art whose body the client cuts from its picture (statues,
         /// sculptures, totems and the like), rather than a model of boxes. M16: thrones,
         /// lecterns, instruments, altars and poppers are models again, made as what they are.
         /// </summary>

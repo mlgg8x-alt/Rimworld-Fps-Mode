@@ -5,7 +5,7 @@ using System.Net.Sockets;
 using System.Text;
 using System.Threading;
 
-namespace RimWorldMW2
+namespace RimWorldFPS
 {
     /// <summary>
     /// Newline-delimited JSON over one localhost TCP connection.
@@ -28,7 +28,7 @@ namespace RimWorldMW2
         private volatile bool running = true;
         private volatile bool connected;
 
-        /// <summary>Lines received from IW4L, oldest first. Drain only on the main thread.</summary>
+        /// <summary>Lines received from the client, oldest first. Drain only on the main thread.</summary>
         public readonly ConcurrentQueue<string> Inbound = new ConcurrentQueue<string>();
 
         /// <summary>Status lines for the main thread to log (Verse.Log is not thread-safe).</summary>
@@ -40,7 +40,7 @@ namespace RimWorldMW2
         {
             this.host = host;
             this.port = port;
-            thread = new Thread(Run) { IsBackground = true, Name = "RimWorldMW2 bridge" };
+            thread = new Thread(Run) { IsBackground = true, Name = "RimWorldFPS bridge" };
             thread.Start();
         }
 
@@ -74,7 +74,7 @@ namespace RimWorldMW2
                 catch (Exception e) when (e is SocketException || e is IOException || e is ObjectDisposedException
                                            || e is AggregateException)
                 {
-                    // IW4L not running yet, or it went away. Retry quietly.
+                    // The client not running yet, or it went away. Retry quietly.
                 }
                 finally
                 {

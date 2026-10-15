@@ -5,10 +5,10 @@ using UnityEngine;
 using Verse;
 using Verse.AI;
 
-namespace RimWorldMW2
+namespace RimWorldFPS
 {
     /// <summary>
-    /// M12: E in MW2. The played colonist works whatever is nearest in front of them: a door
+    /// M12: E in the client. The played colonist works whatever is nearest in front of them: a door
     /// opens (or shuts) the way RimWorld opens one for a pawn passing through, so it closes
     /// again on its own once nobody stands in it; anything with a switch (lamps, power switches,
     /// heaters) is flicked on or off at once, as if a colonist had been sent to flick it.
@@ -34,7 +34,7 @@ namespace RimWorldMW2
             if (pawn.carryTracker?.CarriedThing is Pawn carried && (target == null || target is Pawn))
             {
                 if (pawn.carryTracker.TryDropCarriedThing(pawn.Position, ThingPlaceMode.Near, out _))
-                    Log.Message($"[RimWorldMW2] {pawn.LabelShort} put down {carried.LabelShort}");
+                    Log.Message($"[RimWorldFPS] {pawn.LabelShort} put down {carried.LabelShort}");
                 return;
             }
             if (target is Pawn downed)
@@ -74,7 +74,7 @@ namespace RimWorldMW2
             Job job = JobMaker.MakeJob(JobDefOf.CarryDownedPawnDrafted, downed);
             job.count = 1;
             if (pawn.jobs.TryTakeOrderedJob(job, JobTag.Misc))
-                Log.Message($"[RimWorldMW2] {pawn.LabelShort} picks up {downed.LabelShort}");
+                Log.Message($"[RimWorldFPS] {pawn.LabelShort} picks up {downed.LabelShort}");
         }
 
         /// <summary>Whether <paramref name="thing"/> is something E works: a door, a switch, or
@@ -118,7 +118,7 @@ namespace RimWorldMW2
     }
 
     /// <summary>
-    /// M12: how many times each pawn has been hurt, so IW4L can flash it red as RimWorld does.
+    /// M12: how many times each pawn has been hurt, so the client can flash it red as RimWorld does.
     /// A count rather than a time, so a hurt between two snapshots is never missed.
     /// </summary>
     [HarmonyPatch(typeof(Pawn), nameof(Pawn.PostApplyDamage))]

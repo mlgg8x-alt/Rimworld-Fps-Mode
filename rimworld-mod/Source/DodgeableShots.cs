@@ -5,12 +5,12 @@ using RimWorld;
 using UnityEngine;
 using Verse;
 
-namespace RimWorldMW2
+namespace RimWorldFPS
 {
     /// <summary>
-    /// M8: bullets the MW2 player can dodge. RimWorld still decides when each shot is fired and
-    /// where it is aimed, but it no longer decides whether a bullet strikes the colonist MW2
-    /// plays: IW4L flies every bullet and sends <c>player_struck</c> when one meets the MW2
+    /// M8: bullets the FPS player can dodge. RimWorld still decides when each shot is fired and
+    /// where it is aimed, but it no longer decides whether a bullet strikes the colonist the client
+    /// plays: the client flies every bullet and sends <c>player_struck</c> when one meets the FPS
     /// player, who may have stepped aside or ducked behind a wall since. Only then does the
     /// colonist take the bullet's damage, as RimWorld's own bullet would have dealt it.
     /// </summary>
@@ -27,13 +27,13 @@ namespace RimWorldMW2
             public float angle;
         }
 
-        /// <summary>Bullets IW4L may still report, newest last: enough for any firefight.</summary>
+        /// <summary>Bullets the client may still report, newest last: enough for any firefight.</summary>
         private const int Remembered = 512;
         private static readonly Dictionary<string, Fired> fired = new Dictionary<string, Fired>();
         private static readonly Queue<string> order = new Queue<string>();
 
         /// <summary>Remembers a bullet RimWorld just fired, by the id <see cref="ShotReport"/>
-        /// sends IW4L with it.</summary>
+        /// sends the client with it.</summary>
         internal static void Launched(Projectile bullet, Thing launcher, Vector3 origin, Vector3 destination)
         {
             if (fired.ContainsKey(bullet.ThingID)) return;
@@ -52,7 +52,7 @@ namespace RimWorldMW2
         }
 
         /// <summary>Whether a RimWorld bullet hitting <paramref name="thing"/> should pass by:
-        /// the colonist MW2 plays, while IW4L is there to say what strikes it.</summary>
+        /// the colonist the client plays, while the client is there to say what strikes it.</summary>
         internal static bool Spares(Thing thing)
         {
             if (!(thing is Pawn pawn) || !BridgeGameComponent.Linked) return false;
@@ -60,7 +60,7 @@ namespace RimWorldMW2
             return pawn.Map == map && PlayerPawn.Current(map) == pawn;
         }
 
-        /// <summary>A <c>player_struck</c>: bullet <paramref name="shot"/> met the MW2 player,
+        /// <summary>A <c>player_struck</c>: bullet <paramref name="shot"/> met the FPS player,
         /// who plays <paramref name="pawn"/>; <paramref name="part"/> is <c>head</c> or <c>body</c>.
         /// Each bullet strikes once.</summary>
         public static void Struck(string pawn, string shot, string part)
@@ -87,8 +87,8 @@ namespace RimWorldMW2
         }
     }
 
-    /// <summary>A RimWorld bullet reaching the colonist MW2 plays flies on into the ground:
-    /// IW4L says when a bullet strikes the MW2 player (<see cref="DodgeableShots.Struck"/>).</summary>
+    /// <summary>A RimWorld bullet reaching the colonist the client plays flies on into the ground:
+    /// The client says when a bullet strikes the FPS player (<see cref="DodgeableShots.Struck"/>).</summary>
     [HarmonyPatch(typeof(Bullet), "Impact")]
     internal static class DodgeableBulletImpact
     {

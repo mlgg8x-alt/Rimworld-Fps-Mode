@@ -4,11 +4,11 @@ using RimWorld;
 using UnityEngine;
 using Verse;
 
-namespace RimWorldMW2
+namespace RimWorldFPS
 {
     /// <summary>
-    /// M12: the button on a drafted colonist that hands them to MW2. The game starts and stays
-    /// in RimWorld; "Control in MW2" brings MW2 to the front playing that colonist. Tab in MW2
+    /// M12: the button on a drafted colonist that hands them to the client. The game starts and stays
+    /// in RimWorld; "Play in first person" brings the client to the front playing that colonist. Tab in the client
     /// comes back here with them still selected, and the same button, now "Stop controlling",
     /// lets them go.
     /// </summary>
@@ -27,10 +27,10 @@ namespace RimWorldMW2
             if (icon == null) icon = ContentFinder<Texture2D>.Get("UI/Commands/Attack", false) ?? TexCommand.Draft;
             yield return new Command_Action
             {
-                defaultLabel = controlled ? "Stop controlling" : "Control in MW2",
+                defaultLabel = controlled ? "Stop controlling" : "Play in first person",
                 defaultDesc = controlled
-                    ? "Hand this colonist back to RimWorld. MW2 goes away until you control someone again."
-                    : "Play this colonist in MW2, in first person. Tab in MW2 comes back here.",
+                    ? "Hand this colonist back to RimWorld. The FPS window hides until you play someone again."
+                    : "Play this colonist yourself, in first person, in the FPS window. Tab there comes back here.",
                 icon = icon,
                 action = () =>
                 {

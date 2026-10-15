@@ -3,8 +3,8 @@
   <PropertyGroup>
     <TargetFramework>net472</TargetFramework>
     <LangVersion>latest</LangVersion>
-    <RootNamespace>RimWorldMW2</RootNamespace>
-    <AssemblyName>RimWorldMW2</AssemblyName>
+    <RootNamespace>RimWorldFPS</RootNamespace>
+    <AssemblyName>RimWorldFPS</AssemblyName>
     <OutputPath>../1.6/Assemblies/</OutputPath>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <AppendRuntimeIdentifierToOutputPath>false</AppendRuntimeIdentifierToOutputPath>

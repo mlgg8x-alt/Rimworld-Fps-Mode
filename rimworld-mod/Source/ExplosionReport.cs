@@ -2,10 +2,10 @@ using System.Collections.Generic;
 using HarmonyLib;
 using Verse;
 
-namespace RimWorldMW2
+namespace RimWorldFPS
 {
     /// <summary>
-    /// M4: tells IW4L about every explosion on the map in view as it starts, so MW2 can show and
+    /// M4: tells the client about every explosion on the map in view as it starts, so the client can show and
     /// sound it. RimWorld applies the damage itself.
     /// </summary>
     [HarmonyPatch(typeof(Explosion), nameof(Explosion.StartExplosion))]

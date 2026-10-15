@@ -6,13 +6,13 @@ using UnityEngine;
 using Verse;
 using Verse.AI;
 
-namespace RimWorldMW2
+namespace RimWorldFPS
 {
     /// <summary>
     /// M23: the weapon in a pawn's hands, as RimWorld draws it on the map
     /// (<c>PawnRenderUtility.DrawEquipmentAndApparelExtras</c>): aimed at what it aims at or
     /// attacks, else carried openly while drafted or fighting, and always for enemies. Also
-    /// counts each pawn's melee attacks, so MW2 swings with each one.
+    /// counts each pawn's melee attacks, so the client swings with each one.
     /// </summary>
     [HarmonyPatch(typeof(Pawn_DrawTracker), nameof(Pawn_DrawTracker.Notify_MeleeAttackOn))]
     public static class HeldReport

@@ -2,12 +2,12 @@ using HarmonyLib;
 using UnityEngine;
 using Verse;
 
-namespace RimWorldMW2
+namespace RimWorldFPS
 {
     /// <summary>Mod entry point: applies Harmony patches and owns the bridge settings.</summary>
     public class BridgeMod : Mod
     {
-        public const string HarmonyId = "rimworldmw2.bridge";
+        public const string HarmonyId = "rimworldfps.mode";
 
         public static BridgeSettings Settings;
 
@@ -17,16 +17,16 @@ namespace RimWorldMW2
             new Harmony(HarmonyId).PatchAll();
             Application.quitting += BridgeGameComponent.Shutdown;
             RimView.RepairPrefs();
-            Log.Message($"[RimWorldMW2] loaded, bridge target {Settings.Host}:{Settings.Port}");
+            Log.Message($"[RimWorldFPS] loaded, bridge target {Settings.Host}:{Settings.Port}");
         }
 
-        public override string SettingsCategory() => "RimWorld x MW2";
+        public override string SettingsCategory() => "RimWorld FPS Mode";
 
         public override void DoSettingsWindowContents(Rect inRect)
         {
             var list = new Listing_Standard();
             list.Begin(inRect);
-            list.Label("IW4L bridge address (RimWorld connects, IW4L listens)");
+            list.Label("FPS client address (RimWorld connects, the client listens)");
             Settings.Host = list.TextEntryLabeled("Host", Settings.Host);
             string port = Settings.Port.ToString();
             list.TextFieldNumericLabeled("Port", ref Settings.Port, ref port, 1, 65535);

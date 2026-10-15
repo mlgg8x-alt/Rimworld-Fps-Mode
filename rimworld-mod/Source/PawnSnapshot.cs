@@ -4,7 +4,7 @@ using RimWorld;
 using UnityEngine;
 using Verse;
 
-namespace RimWorldMW2
+namespace RimWorldFPS
 {
     /// <summary>
     /// Builds the M1 <c>snapshot</c> message: every spawned pawn on the map the player is looking at.
@@ -48,14 +48,21 @@ namespace RimWorldMW2
                     .Num("rate", Find.TickManager.Paused ? 1f : Find.TickManager.TickRateMultiplier);
                 string gun = GunTiming(player);
                 if (gun != null) json.Raw("player_gun", gun);
+                // FPS fork: for the status bar, how healthy the colonist is (RimWorld's summary
+                // health, 0 to 1), how well armoured against bullets and blades (sharp armour,
+                // 0 to 2), and what it holds, by name.
+                json.Num("player_health", player.health?.summaryHealth?.SummaryHealthPercent ?? 1f)
+                    .Num("player_armor", player.GetStatValue(StatDefOf.ArmorRating_Sharp));
+                string held = player.equipment?.Primary?.def?.label;
+                if (held != null) json.Str("player_weapon", held);
             }
-            // M18: MW2 holds its player still while RimWorld is paused.
+            // M18: the client holds its player still while RimWorld is paused.
             if (Find.TickManager.Paused) json.Bool("paused", true);
             return json.ToString();
         }
 
         /// <summary>
-        /// M15: how the colonist's gun fires in RimWorld, so MW2 fires it the same way: shots a
+        /// M15: how the colonist's gun fires in RimWorld, so the client fires it the same way: shots a
         /// burst, seconds between them, the colonist's aiming time and the gun's cooldown; null
         /// without a ranged gun.
         /// </summary>
@@ -71,7 +78,9 @@ namespace RimWorldMW2
                 .Num("burst", (long)Mathf.Max(1, props.burstShotCount))
                 .Num("between", props.ticksBetweenBurstShots / 60f)
                 .Num("warmup", warmup)
-                .Num("cooldown", cooldown);
+                .Num("cooldown", cooldown)
+                // FPS fork: how far it shoots, in cells; the client's bullets go no further.
+                .Num("range", props.range);
             // M20: grenades are thrown, this far.
             if (Throws.Thrown(verb, gun)) json.Num("throw", props.range);
             return json.ToString();
@@ -180,7 +189,7 @@ namespace RimWorldMW2
         /// <summary>
         /// RimWorld's pictures of <paramref name="pawn"/>: a person's portrait, else (when
         /// RimWorld could not draw one) their body as drawn on the map; an animal's or mech's
-        /// body. IW4L shows a pawn only as these (M22).
+        /// body. The client shows a pawn only as these (M22).
         /// </summary>
         private static void Pictures(Pawn pawn, Json json)
         {
@@ -213,7 +222,7 @@ namespace RimWorldMW2
             }
             catch
             {
-                // Art some mods draw their own way: IW4L shows nothing for it.
+                // Art some mods draw their own way: the client shows nothing for it.
             }
         }
 

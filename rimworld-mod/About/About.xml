@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <ModMetaData>
-  <name>RimWorld x MW2 Bridge</name>
-  <author>RimWorld x MW2 contributors</author>
-  <packageId>rimworldmw2.bridge</packageId>
+  <name>RimWorld FPS Mode</name>
+  <author>RimWorld FPS Mode contributors (fork of RimWorld x MW2 by rkwitz)</author>
+  <packageId>rimworldfps.mode</packageId>
   <supportedVersions>
     <li>1.6</li>
   </supportedVersions>
@@ -17,5 +17,8 @@
   <loadAfter>
     <li>brrainz.harmony</li>
   </loadAfter>
-  <description>Streams RimWorld raids to a first-person MW2 view running on IW4L. Development build: needs the companion IW4L side from the project repo.</description>
+  <incompatibleWith>
+    <li>rimworldmw2.bridge</li>
+  </incompatibleWith>
+  <description>Play your drafted colonists in first person, boomer shooter style: chunky pixels, a limited palette and RimWorld's own art standing in a Doom-like 3D view. RimWorld stays the game; the companion "boomer" client draws it. Needs the client from the project repo. Fork of RimWorld x MW2 by rkwitz, without Call of Duty.</description>
 </ModMetaData>

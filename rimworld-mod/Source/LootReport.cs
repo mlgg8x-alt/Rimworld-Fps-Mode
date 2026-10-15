@@ -5,11 +5,11 @@ using UnityEngine;
 using Verse;
 using Verse.Sound;
 
-namespace RimWorldMW2
+namespace RimWorldFPS
 {
     /// <summary>
-    /// M4: looting. Tells IW4L what the played colonist has and what lies within its reach
-    /// (<c>loot</c>), and applies MW2's <c>loot_take</c> and <c>loot_drop</c> with RimWorld's own
+    /// M4: looting. Tells the client what the played colonist has and what lies within its reach
+    /// (<c>loot</c>), and applies the client's <c>loot_take</c> and <c>loot_drop</c> with RimWorld's own
     /// calls: equip as <c>JobDriver_Equip</c> does, wear as <c>JobDriver_Wear</c>, carry as
     /// <c>Toils_Haul.TakeToInventory</c>, and drop as the colonist's gizmos do.
     /// Read and changed on the main thread only.
@@ -140,7 +140,7 @@ namespace RimWorldMW2
             int count = Mathf.Min(thing.stackCount, MassUtility.CountToPickUpUntilOverEncumbered(pawn, thing));
             if (count <= 0)
             {
-                Messages.Message("RimWorldMW2: " + pawn.LabelShort + " can't carry any more.", pawn, MessageTypeDefOf.RejectInput, false);
+                Messages.Message("RimWorldFPS: " + pawn.LabelShort + " can't carry any more.", pawn, MessageTypeDefOf.RejectInput, false);
                 return;
             }
             if (holder != null)
