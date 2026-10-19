@@ -1,9 +1,0 @@
-[package]
-name = "bridge-echo"
-version = "0.0.1"
-edition.workspace = true
-license.workspace = true
-description = "Stand-in for the IW4L side: listens, prints every message, answers hello. Milestone M0."
-
-[dependencies]
-rwmw2-protocol = { path = "../protocol" }

@@ -1,314 +1,190 @@
-<img width="2559" height="1439" alt="rimworld_thumb" src="https://github.com/user-attachments/assets/84606393-3be5-4eb6-b93c-924e8735cd58" />
-
-# RimWorld FPS Mode
-
-Play your RimWorld colonists in first person, with RimWorld's own art. A fork of
-[RimWorld x MW2](https://github.com/rkwitz/rimworld-mw2) by rkwitz that drops Call of Duty for
-its own first-person client.
-
-RimWorld stays the game: its map, pawns, health, AI, guns and items. The RimWorld mod reports
-what happens to the client over a local connection (127.0.0.1:47820), and the client draws it in
-3D. Where you walk, your colonist walks; when you shoot, they shoot in RimWorld.
-
-## Install (players)
-
-1. Install [Harmony](https://steamcommunity.com/sharedfiles/filedetails/?id=2009463077).
-2. Download the latest test build from [`dist/`](dist/) and unzip it into `RimWorld/Mods` so you
-   have `Mods/RimWorldFPS/About/About.xml`. Enable it below Harmony.
-3. Start RimWorld (Windows only). The client comes with the mod and starts by itself.
-   The indicator in the top right corner shows its state (green online, yellow starting, red
-   offline) and has a button to force start it; Mod settings > RimWorld FPS Mode has the same,
-   and opens the client's log.
-4. Load a save, select a colonist and turn on **FPS mode**.
+# RimVision – Unity 2022 workspace
 
-See [TESTING.md](TESTING.md) for controls and what to test.
+Главный рабочий проект: D:\Unity\Projects\Prototypes\RimShaders (Unity 2022.3.35f1).
 
-## What is in this repository
+- Код мода: Assets/Rim3D/Runtime. Одни исходники используются в Unity и игровой DLL.
+- Шейдеры: Assets/Rim3DShaders.
+- About, Defs, модели: Assets/Mods/RimVision.
+- Игра: Assets/Plugins (DLL из Steam), Assets/Data, Resources и восстановленные сцены.
+- Сохранения для редактора: SaveData. Исходный Unity 6 проект не изменён.
 
-| Folder | What |
-| --- | --- |
-| `rimworld-mod/` | The RimWorld mod (C#, Harmony): reports the game, takes the player's actions, starts the client. `About/` and `1.6/` are the mod; `Source/` its code. |
-| `client/` | The first-person client (C#, .NET 10, raylib via Raylib-cs): world, pawns, 2D weapons, HUD with edit mode. `--demo` runs it against a made-up colony. |
-| `protocol/` | The line protocol between them (`PROTOCOL.md`, `examples.ndjson`). |
-| `bridge/` | Rust types for the protocol, tested against the examples (`cargo test`). |
-| `dist/` | The latest test build. |
+## Запуск в редакторе
+RimVision > Open RimWorld scene, затем Play. Загрузите сохранение; O включает 3D.
+Редактор использует импортированные шейдеры напрямую, игра – bundle. Не копируйте UnityEngine DLL и не кладите Recovery.Rim3D.dll внутрь Assets: там уже компилируются исходники.
+В режиме от первого лица наведи прицел наверх и нажми E, чтобы сразу покрыть крышей всё выбранное замкнутое помещение и его стены, включая углы. Клетки строятся от опор внутрь с проверкой поддержки по правилам игры; мешающие растения и существующие крыши пропускаются. Ручная установка не создаёт приказ строительства для колонистов. Для снятия всей крыши помещения удерживай Shift + E одну секунду, не двигаясь и не меняя клетку под прицелом. Если стены разобраны, снимается связанный участок крыши. Снятие работает без текстовых подсказок и процентов; толстая горная крыша не снимается. Зона строительства убирается во всём выбранном помещении, чтобы колонисты не восстановили крышу автоматически. После ручного изменения запускаются штатные проверки связи и расстояния до опор: неподдерживаемые крыши попадают в игровую очередь обрушения с обычными последствиями.
+
+## Контекстное меню от первого лица
 
-## Build
-
-```
-dotnet build rimworld-mod/Source/RimWorldFPS.csproj -c Release   # the mod, into rimworld-mod/1.6/Assemblies
-dotnet run --project client -- --demo                            # the client, without RimWorld
-scripts/package.sh RimWorldFPS                                   # mod + Windows client + handoff + source -> dist/
-cd bridge && cargo test                                          # the protocol
-```
-
-Windows only. The mod looks for the client in `RimWorldFPS/Client/win-x64/RimFpsClient.exe`.
-
----
-
-# Upstream: RimWorld x MW2
-
-Play RimWorld fights in first person, in Call of Duty: Modern Warfare 2 (2009).
-
-RimWorld runs the game: its map, its pawns, their health, AI, guns and items. A RimWorld mod
-reports what happens to a patched build of [IW4L](https://github.com/vladtrc/iw4L), an
-open-source MW2 engine written in Rust. IW4L draws the same scene in 3D, and the two talk
-over a local connection on your PC. Draft a colonist, press **Control in MW2**, and you
-play that colonist in first person. Where you walk, they walk, and when you shoot, they
-shoot in RimWorld.
-
-What works today:
-
-- The RimWorld map is rebuilt in MW2: ground, floors, walls, doors, roofs, mountains, caves,
-  trees, grass, crops, furniture and items, using RimWorld's own pictures and MW2 models.
-- Every pawn is there as RimWorld's own picture of them: colonists, raiders, animals and
-  mechs.
-- Drafted colonists and raiders hold their actual weapon, RimWorld's picture of it, aimed at
-  what they shoot at. Melee attackers swing their weapon and lunge.
-- You use your colonist's own gun, with RimWorld's burst, warm-up and cooldown. Your hits
-  wound the body part you hit in RimWorld. RimWorld's bullets fly at you and can be dodged.
-- You can throw your colonist's grenades. Explosions, fire, smoke, gas, rain, snow, fog,
-  blood, firefoam and RimWorld's small effects all show in MW2.
-- **E** opens doors, flicks switches and carries downed pawns. **F** opens your
-  inventory. **Tab** brings RimWorld up, and RimWorld's own window is the minimap in the
-  top-left corner.
-- You move as fast as your colonist does, slowed by injuries, trees and terrain.
-
-Progress and plans are in [docs/ROADMAP.md](docs/ROADMAP.md).
-
-> **You need your own copies of both games.** This repo contains no game code or assets.
-> Setup reads your installs and writes everything it makes into folders that are never
-> committed: `engine/`, `../reference/` and the textures folder. Please do not share them.
-> Play offline only and never connect modded clients to online services.
-
-## Requirements
-
-**Windows 10 or 11.** The one-command run (`play.bat`) and window handling are
-Windows-only. The engine also builds on Linux and macOS, but running both games together
-there has not been tried.
-
-Games (Steam):
-
-- **RimWorld 1.6**, with **[Harmony](https://steamcommunity.com/sharedfiles/filedetails/?id=2009463077)**
-  from the Steam Workshop (click Subscribe).
-- **Call of Duty: Modern Warfare 2 (2009)**, the multiplayer files that Steam installs with
-  it. No DLC is needed.
-
-Tools (install them in this order, then open a new terminal):
-
-| Tool | Why | Get it |
-|---|---|---|
-| Git | Downloads this repo and the engine | https://git-scm.com |
-| Python 3.10 or newer | Runs the setup script | https://www.python.org (tick **Add python.exe to PATH**) |
-| .NET SDK 10 | Builds the RimWorld mod | https://dotnet.microsoft.com/download/dotnet/10.0 |
-| Visual Studio Build Tools, **Desktop development with C++** | The C/C++ linker Rust needs on Windows | https://visualstudio.microsoft.com/downloads/ (Build Tools or Community) |
-| Rust, through rustup | Builds the engine | https://rustup.rs (accept the defaults) |
-
-Check them in a new PowerShell window. Each command should print a version:
-
-```powershell
-git --version
-python --version
-dotnet --version
-cargo --version
-```
-
-Disk and time: the engine's first build needs about 15 GB free and takes 15 to 40 minutes,
-depending on your CPU. Later runs only rebuild what changed.
-
-## Install
-
-### 1. Get the code
-
-Make a folder for modding projects and clone this repo into it:
-
-```powershell
-mkdir $HOME\Documents\game_modding
-cd $HOME\Documents\game_modding
-git clone https://github.com/rkwitz/rimworld-mw2
-cd rimworld-mw2
-```
-
-Setup puts the engine in `rimworld-mw2\engine\` and optional reference material next to the
-repo in `game_modding\reference\`.
-
-### 2. Check your setup
-
-```powershell
-python scripts\setup.py doctor
-```
-
-Git, dotnet, cargo, Python, RimWorld and MW2 should all say `[ok]`. The other warnings are
-fine at this point. `ilspycmd` is only needed for development (see [Development](#development)),
-and the folders under *Workspace* get made by the next steps. If a game isn't found, copy
-`.env.example` to `.env` and fill in its folder:
-
-- `RIMWORLD_DIR` is the folder that holds RimWorld's `Version.txt`.
-- `IW4L_GAMES` is the folder that *contains* the `Call of Duty Modern Warfare 2` folder,
-  usually `C:\Program Files (x86)\Steam\steamapps\common`.
-
-Then run `doctor` again.
-
-### 3. Download and patch the engine
-
-```powershell
-python scripts\setup.py engine
-```
-
-This downloads the pinned engine (chasm's
-[2010 Rust rewrite mashup](https://github.com/chasmlol/2010-rust-rewrite-mashup), built on
-IW4L) into `engine\` and applies every patch in `engine-patches\`. The last lines should be
-`applied 0039-...patch`, then `wrote IW4L_GAMES, IW4L_SKATE=off to ...\engine\target\play\.env`.
-That file is where the engine keeps its settings. It points the engine at your MW2 folder
-and turns off Skate 3 mode, which this project doesn't use.
-
-### 4. Build the RimWorld mod and add it to RimWorld
-
-```powershell
-python scripts\setup.py build-mod
-python scripts\setup.py link-mod
-```
-
-`build-mod` writes `rimworld-mod\1.6\Assemblies\RimWorldMW2.dll`. `link-mod` links the
-`rimworld-mod` folder into RimWorld's `Mods` folder as `RimWorldMW2`, so later builds take
-effect without copying anything.
-
-Start RimWorld once, open **Mods**, and enable **Harmony** and then **RimWorld x MW2 Bridge**,
-in that order with the bridge below Harmony. RimWorld restarts. Then close RimWorld.
-
-## Play
-
-From the `rimworld-mw2` folder, run:
-
-```powershell
-.\play.bat
-```
-
-`play.bat` (the same as `python scripts\setup.py play`) does everything in order:
-
-1. It builds the mod if RimWorld is closed. While RimWorld is open the DLL is locked, so it
-   says so and skips the build.
-2. It applies any new engine patches.
-3. It starts RimWorld through Steam unless RimWorld is already open. Add `--no-rimworld` to
-   skip this.
-4. It builds and starts the engine on the `rimworld:flat` map. The first time, this is the
-   long build mentioned above.
-
-The terminal shows the engine's output. Leave it open. Then:
-
-1. **Load a RimWorld save** (any colony). The mod turns on RimWorld's *Run in background*
-   option so RimWorld keeps running while MW2 is in front.
-2. **Draft a colonist** and click **Control in MW2** at the bottom of the screen. MW2's
-   window comes up in borderless fullscreen and you are that colonist. RimWorld's window
-   becomes the minimap in the top-left corner.
-3. To give the colonist back, press **Tab** to bring up RimWorld and click
-   **Stop controlling**, or undraft them. MW2 hides again until you control someone else.
-
-When you close RimWorld, MW2 closes too and `play.bat` ends.
-
-The first time MW2 starts, its volume is 30%. After that it keeps whatever you set in its
-options.
-
-### Controls in MW2
-
-| Key | What it does |
-|---|---|
-| WASD, mouse | Walk and look. Your colonist walks with you in RimWorld |
-| Shift | Sprint, as fast as your colonist can run |
-| Left mouse | Fire your colonist's gun. If they hold grenades, throw one where you aim |
-| G | Throw a grenade |
-| R | Reload. The clip is your gun's burst, and reloading takes its cooldown |
-| E | Open or shut the door in front of you, flick a switch, or pick up or put down a downed pawn |
-| F | Your colonist's inventory: take items from the ground and drop your own |
-| Tab | Bring up RimWorld, fully playable. Tab in RimWorld goes back to MW2 |
-| Escape | Menu: Resume, Options, Quit |
-
-While RimWorld is paused, you can look around but not move or shoot.
-
-### Settings
-
-These are environment variables. Set them in PowerShell before running `play.bat`, for example
-`$env:RWMW2_FULLSCREEN = "0"`.
-
-| Variable | Default | What it does |
-|---|---|---|
-| `RWMW2_ONE_WINDOW` | `1` | `0` keeps MW2's window open all the time (and open after RimWorld closes) |
-| `RWMW2_FULLSCREEN` | `1` | `0` leaves MW2 windowed while you control a colonist |
-| `RWMW2_RIMWORLD_PLANTS` | `1` | `0` uses MW2 tree models instead of RimWorld's plant pictures |
-| `RWMW2_STANDIN_MAP` | `mp_estate` | The MW2 map whose models and textures are borrowed |
-| `RWMW2_BRIDGE_ADDR` | `127.0.0.1:47820` | Where the engine listens for RimWorld. The port can also be changed in the mod's settings |
-
-## Troubleshooting
-
-- **Logs.** Each `play.bat` run writes the engine's output to `logs\engine.log`. RimWorld's
-  log is `%USERPROFILE%\AppData\LocalLow\Ludeon Studios\RimWorld by Ludeon Studios\Player.log`.
-  Lines from the mod start with `[RimWorldMW2]` and lines from the engine with `[rimworld]`.
-- **No "Control in MW2" button.** The colonist must be drafted, and the mod must be enabled
-  below Harmony. Check Player.log for `[RimWorldMW2] bridge connected`. If it is missing, the
-  engine isn't running or the port is wrong.
-- **The engine asks for a Skate 3 file, or stops with `iw4l-skate-convert.exe is missing`.**
-  Run `python scripts\setup.py engine` again, or add the line `IW4L_SKATE=off` to
-  `engine\target\play\.env`.
-- **The engine can't find MW2.** Set `IW4L_GAMES` in `engine\target\play\.env` to your
-  `Call of Duty Modern Warfare 2` folder, the one with `iw4mp.exe` and `zone\`.
-- **The mod didn't rebuild.** RimWorld locks the mod's DLL while it is open. Close RimWorld
-  and run `play.bat` again.
-- **A patch fails to apply.** `engine\` must be exactly at the commit pinned in
-  `versions.json`. Run `python scripts\setup.py engine --force` to download it fresh.
-  `--force` deletes `engine\`, including the build and your MW2 settings in
-  `engine\target\play\iw4l-artifacts`.
-
-### Checking the connection alone
-
-To test the RimWorld side without the engine:
-
-```powershell
-cd bridge
-cargo run -p bridge-echo
-```
-
-Load a save in RimWorld. The terminal shows `hello from Rimworld` and then a tick count every
-second. Stop it with Ctrl+C before running `play.bat`.
-
-## Development
-
-How it fits together:
-
-```
-game_modding\                 your workspace folder, may hold other projects too
-├ reference\                  optional, made by setup, never committed
-│ ├ repos\                    pinned reference repos
-│ └ rimworld\                 decompiled\ and defs\ from your own RimWorld
-└ rimworld-mw2\               this repo
-  ├ rimworld-mod\             the RimWorld mod (C#, Harmony)
-  ├ bridge\                   the message types (Rust) and a test echo server
-  ├ protocol\                 the wire format: PROTOCOL.md and examples
-  ├ engine-patches\           our changes to the engine, as patches
-  ├ scripts\setup.py          setup, build and play
-  └ engine\                   the patched engine, made by setup, never committed
-```
-
-- Architecture: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Messages:
-  [protocol/PROTOCOL.md](protocol/PROTOCOL.md). Engine patches:
-  [engine-patches/README.md](engine-patches/README.md).
-- To read RimWorld's code and XML while working on the mod, install `ilspycmd`
-  (`dotnet tool install --global ilspycmd --version 11.1.0.9782`), then run
-  `python scripts\setup.py all`. It downloads the reference repos and decompiles **your**
-  RimWorld into `..\reference\rimworld\`. Never commit or share that folder.
-- Pinned versions are in [versions.json](versions.json). Change them on purpose, in their own
-  commit.
-- Engine changes are new numbered patches in `engine-patches\`, made against the pinned
-  engine commit with all earlier patches applied.
-- Protocol changes touch `bridge\crates\protocol`, `protocol\PROTOCOL.md`,
-  `protocol\examples.ndjson` and the mod together. `cargo test` in `bridge\` checks the
-  examples.
-- Tests: `cargo test` in `bridge\`, `cargo test -p rimworld_world` in `engine\`, and
-  `python scripts\setup.py build-mod`.
-- Notes for AI coding agents: [CLAUDE.md](CLAUDE.md).
-
-## License
-
-Apache-2.0, the same as IW4L and the engine base. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
-RimWorld's EULA allows decompiling for learning and as a reference for mods, but forbids
-redistributing its code, and mods must be free. This is an unofficial fan project, not
-affiliated with Ludeon Studios or Activision.
+ПКМ также показывает штатные кнопки управления объектом из панели 2D: назначение спального места для колонистов, пленных и рабов (при наличии Ideology), медицинский режим, выбор владельца и другие команды построек и предметов. Активные переключатели отмечены галочкой; недоступные команды показывают причину. Подменю и окна открываются штатно, ограничения игры сохраняются. Команды собираются только при открытии меню.
+
+Рядом с подходящим персонажем ПКМ предлагает арест с отображением штатного шанса успеха, в том числе вне боевого режима. Нужна тюремная кровать; сопротивление и последствия для отношений обрабатываются штатным заданием RimWorld. Перенос до кровати выполняется вручную. Переносимые люди и тела отображаются с внешностью и одеждой в руках, в мире и на панели персонажа; портреты кэшируются и обновляются при изменении внешности.
+
+Команды с дополнительной целью используют прицел 3D: наведите его на персонажа или объект и подтвердите ЛКМ; ПКМ или Esc отменяет выбор. Подходящая цель отмечается зелёной рамкой и именем. Если до места выполнения задания осталось не больше 1,5 клетки и прямой проход свободен, персонаж плавно подходит и сразу продолжает работу. Уборка и другие действия с дистанцией касания выполняются с соседней клетки: подход не заводит персонажа в клетку цели и останавливается, как только хватает дистанции. К дальним целям, кроватям и боевым целям нужно подходить вручную. Это относится и к промежуточным шагам – взять предмет, подойти к персонажу, отнести результат. Ручное движение имеет приоритет над коротким подходом. Q отменяет задание, а движение во время непосредственного выполнения работы прерывает её.
+
+Меню 3D дополняется штатными командами RimWorld для объекта под прицелом: надевание одежды, взаимодействия с пешками, постройками и предметами, а также команды подключённых модов через игровые провайдеры меню. Недоступные штатные команды отображаются с причиной. Список генерируется только при открытии ПКМ, по выбранной 3D-лучом цели. Штатные задания выполняются персонажем с последующим возвратом к ручному управлению; движение прерывает задание.
+
+ПКМ открывает компактное меню действий для объекта под прицелом вместо H. Список зависит от цели; меню помещается в экран и прокручивается при необходимости. ЛКМ выбирает действие, ПКМ, Esc или клик снаружи закрывает меню. E сохраняет быстрое взаимодействие; удерживание E у предмета позволяет выбрать количество. При размещении постройки ПКМ убирает инструмент. В списке остаются доступные персонажу действия; еда проверяется по правилам RimWorld. В 2D ПКМ с одной выделенной пешкой открывает штатное меню доступных приказов, включая случай единственной команды.
+
+## Зоны от первого лица
+
+Склады, свалки и зоны посевов постоянно обозначены тонким приглушённым голубым контуром на земле в 3D, включая режим обзора. Контур виден без инструмента зон; во время разметки границы становятся ярче. Отрисовываются только открытые клетки в пределах 40 клеток от камеры; проверка изменений выполняется дважды в секунду, меш переиспользуется и обновляется только при изменениях.
+
+B → «Зоны и области» открывает выбор склада, свалки, зоны посевов, расширения/сокращения домашней области и удаления клеток зон. Наведите прицел на землю и нажмите ЛКМ для первого угла, затем ЛКМ для второго. Зелёная рамка показывает размер участка; красная означает превышение лимита 64 × 64 клеток за одно действие. Дальность выбора – 40 клеток. Можно ходить между отметками углов.
+
+Чтобы расширить существующий склад или посевы, отметьте первый угол внутри нужной зоны. Удерживайте Shift при втором клике для сокращения этой зоны. Инструмент удаления клеток также ограничивается зоной первого угла, если он внутри неё; первый угол на свободной земле позволяет удалить клетки разных зон в прямоугольнике. Неподходящие клетки и туман пропускаются; существующие зоны не перезаписываются. ПКМ, Q или Esc убирает инструмент. Границы ближайших зон подсвечиваются во время разметки; домашняя область показывается при работе с ней.
+
+E при активном инструменте зон открывает настройки зоны под прицелом: для склада – штатный фильтр и приоритет хранения, для посевов – штатные команды выбора растения, посева и срезания. Пункт настроек также доступен в меню зон, если смотреть на существующую зону. Изменения клеток передаются через адаптер Multiplayer. Отрисовка использует два переиспользуемых меша; границы обновляются только при изменении локального участка.
+
+## Меню персонажа от первого лица
+
+T с пустыми руками или лекарством в руках запускает самолечение. Оно также доступно через Y и ПКМ. Чтобы лечить другого персонажа, подойдите вплотную и выберите лечение в ПКМ по нему. Используются только медикаменты в руках, с учётом разрешённого пациенту уровня лекарств; без них выполняется обработка руками. Лечение повторяется до обработки всех нуждающихся ран, после расходования лекарств продолжается без них. Время, качество, штраф самолечения, опыт и расход лекарства обрабатываются по правилам RimWorld. Движение и Q прерывают лечение; менять настройку автоматического самолечения не требуется.
+
+Справа сверху в режиме от первого лица отображается спрайт управляемого персонажа сбоку: текущая одежда, головной убор и видимые ранения берутся из игрового кэша портретов. Оружие показывается, когда персонаж держит его открыто или целится; переносимый предмет отображается в мирном режиме. При смене персонажа изображение переключается автоматически.
+
+T выполняет доступное основное действие с предметом в руках: съесть/принять, надеть одежду, экипировать оружие, читать книгу или использовать предмет со штатным CompUsable. Y открывает список доступных действий с этим предметом, включая хранение и выбрасывание. Подсказки включаются по предмету и состоянию персонажа; клавиши не работают при вводе текста, в других меню, с Alt и при размещении постройки. В инвентаре также доступны основное действие и полный список. Для использования сохраняются штатные подтверждения и эффекты RimWorld, для одежды – время надевания и ограничения экипировки. Предметы без личного действия (например, строительные ресурсы) сохраняют действия хранения, выбрасывания и внесения в стройку через E.
+
+Tab открывает единое меню персонажа с инвентарём, оружием, предметом в руках и надетой одеждой/бронёй с прочностью. Здоровье, навыки, настроение и социум переключаются мышью в левой панели. Tab или Esc закрывает меню из любого раздела. Разделы также доступны в левой панели, ниже находятся работы, назначения, наука и задания колонии. Горячие клавиши персонажа не срабатывают при вводе в поиске строительства или в стороннем диалоге.
+
+Совместимые предметы при хранении в инвентаре объединяются в стаки с учётом лимитов RimWorld. Кнопка «Объединить стаки» в меню инвентаря собирает ранее накопленные раздельные стаки. «Взять в руки» также пополняет совместимый стак в руках до его лимита; остаток остаётся в инвентаре. Объединение выполняется только при действии игрока, без постоянного обхода инвентаря.
+
+## Сборка игрового пакета
+В боевом режиме от первого лица H переключает одиночный огонь, очередь и
+автоматический огонь у пулевого оружия со штатной очередью RimWorld.
+ЛКМ выпускает одиночную пулю или очередь; удерживание повторяет очереди либо
+ведёт непрерывный автоматический огонь. Длина очереди и темп берутся из оружия.
+Миниган, ручной пулемёт, тяжёлый ПП и автоматический дробовик начинают в
+автоматическом режиме; остальные подходящие стволы — в режиме очереди.
+Полоса под прицелом показывает нагрев. Длительная стрельба перегревает оружие
+и блокирует выстрелы на 5 игровых секунд. Миниган и ручной пулемёт имеют больший
+запас до перегрева. Нагрев и задержка сохраняются за оружием при смене рук,
+персонажа и при сохранении игры; остывание идёт по игровым тикам и замирает на паузе.
+В Multiplayer клиент передаёт состояние спуска и направление прицела; выстрелы
+автоматического огня и продолжение очереди выполняются в синхронных тиках карты.
+Нажатие запускает очередь даже при отпускании в том же тике. При отмене действия,
+открытии меню или потере управляющего ввода огонь прекращается; нагрев сохраняется.
+
+Настройки RimVision находятся во вкладках «Графика», «Мир», «Эффекты»,
+«Интерфейс» и «Управление». Они включают качество изображения, детализацию
+моделей и гор, яркость ночью, генерацию моделей построек, 3D-модели животных
+и растений из аддонов и размер деревьев. Если модель для животного или растения
+не найдена, используется игровой спрайт. Деревья по умолчанию вдвое крупнее;
+отдельный переключатель возвращает прежний размер. Эффекты настраивают погоду,
+снег, огонь, тени, покачивание камеры, тряску при ранении и экранные эффекты
+состояния. Интерфейс управляет HUD, компасом, предметами и руками от первого
+лица, прицелом и боевыми индикаторами. Управление включает угол обзора,
+чувствительность и инверсию мыши, переключение пешек и ускорение действий.
+
+Отдельная настройка отключает замедление от травы и других растений при ручном
+управлении. По умолчанию замедление включено; штрафы земли, снега, песка и
+построек сохраняются. В Multiplayer используется настройка хоста: изменения
+синхронизируются, а общее значение сохраняется вместе с игрой и передаётся
+подключающимся игрокам. Блокировка пешек в Multiplayer также задаётся хостом;
+графические настройки остаются локальными.
+
+RimVision > Build mod (DLL + shaders + ZIP) собирает DLL через установленный .NET SDK, затем пакет в Build/RimVision.zip.
+RimVision > Build and install in RimWorld собирает и устанавливает пакет; предыдущая версия сохраняется в Backups. После установки перезапустите RimWorld.
+RimVision > Choose RimWorld folder меняет путь игры. Нужен установленный HarmonyMod.
+Отдельный общий аддон совместимости с другими модами поддерживает
+[NL] Facial Animation: мимика обновляется на текстурах пешек в 3D.
+Interaction Bubbles: облачка взаимодействий отображаются над видимыми пешками в 3D.
+RimVision > Mod compatibility > Build addon (DLL + ZIP) создаёт
+Build/RimVision-Mod-Compatibility.zip; Build and install addon in RimWorld также
+устанавливает его с резервной копией. Обычная сборка RimVision его не включает.
+Исходники и инструкция: ModBuild/Compatibility. Multiplayer-аддон остаётся отдельным.
+В игре bundle находится в ShaderBundles, не AssetBundles.
+Вода в 3D использует отдельный Water.shader: рябь в мировых координатах, цвет по типу глубины, приближённое отражение неба и солнечные блики. Один проход без дополнительных камер, GrabPass, прозрачности и обновления мешей; освещение, крыши, тени и погодный туман сохраняются. Болота используют исходный материал земли. Новый шейдер включается в bundle при обычной сборке мода.
+Лог компиляции: Build/Build.log. Ошибки шейдеров: Unity Console.
+
+Небо в 3D плавно меняет дневные, закатные и ночные цвета по локальному времени карты. Солнце и луна движутся по небосводу; звёзды проявляются ночью и закрываются облаками. Два облачных слоя используют одну небольшую бесшовную текстуру шума, создаваемую при открытии вида, и плавную облачность штатного перехода погоды. Движение останавливается на паузе и следует ускорению игры. Внешние текстуры не нужны; обновлённый PreviewSky.shader включается в обычную сборку мода.
+
+## Локализация
+
+Основа переводов использует штатную систему RimWorld: английский и русский
+словари находятся в Assets/Mods/RimVision/Languages. Сборщик автоматически
+включает их в игровой пакет. Инструкция для новых строк и языков:
+Assets/Mods/RimVision/Languages/README.md. Весь пользовательский текст
+игрового Runtime, включая подсказки, причины недоступности действий и сообщения
+Multiplayer, подключён к словарям. Описания заданий используют DefInjected.
+
+## Изменения и перенос
+Пакеты 3D-моделей могут поставляться отдельными модами: RimVision читает XML
+из OptionalContent/RimVision/Models всех активных модов, включая подпапки.
+Прежняя папка OptionalContent/RimWorld3DVR/Models также поддерживается.
+Подходящая модель из мода ниже в списке загрузки имеет приоритет.
+Инструкция и пример XML: OptionalContent/RimVision/README.md в игровом пакете
+(Assets/Mods/RimVision/OptionalContent/RimVision/README.md в проекте).
+
+В OptionalContent добавлен набор из 89 простых моделей построек и пропов:
+мебель, урны, оборудование DLC и обломки. У переносимых предметов убраны
+упрощённые одноцветные корпуса: лекарства, ресурсы, книги и другие предметы
+снова используют исходную игровую текстуру с объёмом по её контуру.
+Уже существующие модели сохраняются; растения,
+деревья, кусты и напольные маркеры используют прежнее отображение. Модели
+объединяются в меши чанков, одноцветные материалы переиспользуются, корпус
+не имеет прозрачных дыр от игровых спрайтов. Поддержка DLC включается только
+для существующих ThingDef. Генератор: ModBuild/GenerateSimpleProps.py;
+запуск `python ModBuild/GenerateSimpleProps.py` обновляет только эти модели.
+Обычная сборка автоматически включает их в игровой пакет.
+
+Изменяйте код и шейдеры здесь, затем собирайте мод через меню. Повторное копирование из Unity 6 для обычного обновления не требуется.
+Для переноса механик обратно в исходный Unity 6 проект переносите изменённые файлы Runtime выборочно: ModIntegration, NativeMouse, Rim3DEditorRuntime и загрузчики ModAssets относятся к игровому порту. В исходном редакторе иной способ подключения к игре. Автоматически перезаписывать его нельзя.
+
+Не публикуйте Assets/Data, Resources и DLL RimWorld вместе с модом. Сборщик включает только собственный мод и его шейдеры.
+
+## Исправление падения редактора (2026-10-07)
+Копия Assets/Plugins/Unity.Burst.dll в редакторе исправлена для выполнения управляемого кода: BurstCompiler.get_IsEnabled и проверка BurstCompilerHelper.IsCompiledByBurst возвращают false. Это исключает обращение к отсутствующему нативному компилятору Burst при Play. Игровые DLL Steam и игровой мод не менялись. Оригинал сохранён в Backups/CrashFix-*. Не заменяйте редакторную копию DLL исходной из игры.
+Rim3DRecoveryRepair автоматически исправляет ссылки восстановленных Entry/Play сцен по фактическим MonoScript ID Unity 2022. Повторный запуск доступен через RimVision > Repair recovered scene references.
+Редакторные копии Assembly-CSharp и Assembly-CSharp-firstpass переименованы на уровне сборок в RimWorld.Game и RimWorld.Firstpass: зарезервированное имя Assembly-CSharp мешало Unity 2022 распознавать MonoBehaviour из игровой DLL. Ссылки между этими сборками обновлены, GUID сохранены. Unity 2022 успешно импортировала компоненты Root_Entry, Root_Play, CameraDriver и остальные; отчёт Build/SceneRepair.success. Сборщик игрового мода по-прежнему использует оригинальные Steam DLL.
+
+## Загрузка сохранений в редакторе
+36 вызовов Unity.Jobs в редакторной RimWorld.Game.dll перенаправлены на Recovery.EditorJobs.dll: задачи выполняются последовательно с соблюдением зависимостей. Это устраняет проверки AtomicSafetyHandle, отсутствующих в игровых NativeContainer из player-сборки. Исходники адаптера: ModBuild/JobsCompatibility; патчер: ModBuild/RecoveryTool. Steam выключен только для редактора; Harmony уже загружается через Assets/Plugins. Для применения изменений игровых DLL полностью перезапустите Unity и заново загрузите сохранение. Сборка игрового мода использует оригинальные Steam DLL; редакторные адаптеры в пакет не включаются.
+
+## Цвет и классы сохранения
+ProjectSettings/ProjectSettings.asset использует Gamma (как исходный редактор), потому что восстановленные 2D-материалы рассчитывались для этого цветового пространства. EditorModAssemblyDiscovery включает Unity-сборку Recovery.RimVision в GenTypes.AllActiveAssemblies; EditorModTypeDiscovery разрешает классы мода из сохранений напрямую. Это исправляет отсутствие JobDriver_Rim3DSleep без редактирования сохранения. После изменений выйдите из Play, перезапустите Unity и загрузите исходное сохранение заново.
+
+## Инициализация мода и создание мешей
+Перед CreateModClasses редакторная сборка Recovery.RimVision регистрируется в content.assemblies.loadedAssemblies своего мода, чтобы конструктор получал правильный ModContentPack. MeshFilter/MeshRenderer проверяются оператором == null Unity, а не ??, который не учитывает специальные null-объекты редактора.
+
+В BeforeSceneLoad сначала инициализируется UnityData, затем подключаются только редакторные патчи обнаружения типов и совместимости. Игровые Harmony-патчи и шейдеры подключаются через LongEventHandler.ExecuteWhenFinished после загрузки контента на главном потоке, в редакторе и в игре. Это предотвращает преждевременную инициализацию ReservationManager и BaseContent с повреждением UI-материалов. После такой ошибки полностью перезапустите Unity: уже созданные статические ресурсы не восстановятся от одной перекомпиляции.
+
+## Отключение мода в редакторе
+
+Редактор исключает отключённый Rim3DMod из создания Mod-классов и отбрасывает оставшийся пустой дескриптор. Это устраняет NullReferenceException при открытии окна модов после отключения Rim3D. После обновления исходников выйдите из Play и дождитесь компиляции перед следующим запуском.
+
+## Совместная сборка Multiplayer
+
+Исходники мода совместимости: ModBuild/Multiplayer/Source. Теперь они изменяются
+в этом проекте вместе с Assets/Rim3D/Runtime.
+RimVision > Include Multiplayer compatibility in build включён по умолчанию.
+Обычная сборка создаёт Build/RimVision.zip и Build/RimVision-Multiplayer-Compat.zip;
+Build and install in RimWorld устанавливает оба мода с резервными копиями.
+Совместимость всегда компилируется против текущего основного Rim3D.
+После сборки DLL совместимости также обновляется в Assets/Mods для редактора:
+ссылки на игровые сборки адаптируются под RimWorld.Game и RimWorld.Firstpass.
+Основной RimVision в редакторе компилируется из Runtime; игровая DLL туда не копируется.
+Для сброса уже загруженных модов и Harmony-патчей после обновления перезапустите Unity.
+Без установленного Multiplayer отключите этот пункт для одиночной сборки.
+Сетевой режим внутри Unity Play не подключён; запускайте сессию в RimWorld.
+На всех клиентах установите одинаковые версии обоих модов и перезапустите игру.
+
+## Импорт модов Multiplayer в Unity
+
+При копировании игровых модов в Assets/Mods их DLL ссылаются на Assembly-CSharp,
+а редакторная игровая сборка называется RimWorld.Game. Команда
+RimVision > Adapt copied mods for Unity Editor переписывает ссылки редакторных копий
+на RimWorld.Game/RimWorld.Firstpass и переносит дубликаты Harmony, резервные DLL
+и дубликат System.IO.Compression из Assets в Backups/EditorMods-*.
+Не отключайте проверку ссылок вместо адаптации. После операции перезапустите Unity.
+Из консоли: dotnet run --project ModBuild/RecoveryTool/RecoveryTool.csproj -- . editor-mods
+Игра и игровой пакет не меняются. Адаптация исправляет ссылки при импорте;
+работа сетевой сессии и требования Prepatcher в Unity Play отдельно не подтверждены.
+
+## Горячие клавиши от первого лица
+
+G – выложить предмет из рук. E – взаимодействовать: взять предмет, внести ресурсы или строить готовый проект. ЛКМ – атака в боевом режиме; СКМ (нажатие колеса) – подойти и ударить. F – боевой режим; R – поменять оружие и предмет в руках или повернуть выбранную постройку; B – строительство; Q – отменить действие. Z – убрать предмет из рук в инвентарь. Tab – открыть или закрыть меню персонажа и инвентарь; N – следующий колонист (при закрытых меню). Отдельные X, I, J, K, U больше не назначены на действия Rim3D.
+
+## Настройки мода
+
+X в режиме от первого лица переключает «Ускорение при действиях»; выбор сохраняется в настройках мода. При включённом режиме над панелью предметов слева снизу отображается компактный индикатор со штатной иконкой скорости RimWorld. При фактическом ускорении он светлеет; состояние и клавиша X указаны в подсказке при наведении с Alt. При выключении индикатор скрыт, в меню тоже не отображается. При выполнении действия на месте включается штатная скорость Superfast для всей симуляции; завершение, отмена, бой и ожидание ручного подхода возвращают обычную скорость. Пауза и штатные ограничения скорости RimWorld сохраняются. Переключить режим мышью можно с отпущенным курсором (Alt). В Multiplayer переключатель недоступен.
+
+В игре: Настройки → Настройки модов → Rim3D. Изменения применяются сразу и сохраняются штатно при закрытии настроек. Доступны общий переключатель дополнительных эффектов, осадки, атмосферный туман, снег на земле, пламя, тени, покачивание камеры, тряска при ранении и экранные эффекты состояния. Отдельно включаются предметы в руках, портрет, полосы потребностей, прицел, индикаторы стрельбы и сердцебиение. Можно изменить угол обзора (50–110°), чувствительность и инверсию мыши, масштаб рендера (50–150%) и сглаживание. Сброс возвращает прежний вид по умолчанию. Эти настройки локальные и не меняют игровую симуляцию.
